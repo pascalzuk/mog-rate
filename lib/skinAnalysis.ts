@@ -215,6 +215,9 @@ export function analyzeSkin(
     const fineDarkRes = fineLum[i] - lum[i];
     const coarseRedRes = red[i] - coarseRed[i];
     const coarseDarkRes = coarseLum[i] - lum[i];
+    // A spot has to be both redder and darker than the skin around it. Trying a
+    // darkness-only path as well turned shadows and stubble on a clear face into
+    // 25 "spots", so redness stays a required signal.
     const fineSpot = fineRedRes > th && fineDarkRes > th * 0.55;
     const broadSpot = coarseRedRes > th * 1.4 && coarseDarkRes > th * 0.9;
     if (fineSpot || broadSpot) {
