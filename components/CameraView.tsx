@@ -24,9 +24,13 @@ type Props = {
 };
 
 const MINT = '#4cff9b';
-const SAMPLES = 6;
-const SAMPLE_GAP = 120;
-const ANALYSIS_WIDTH = 640;
+// Nine frames over about 1.2s. Six finished so fast the read felt like a guess,
+// and a median over nine is much harder for a blink or a smear to move.
+const SAMPLES = 9;
+const SAMPLE_GAP = 130;
+// 800px wide is roughly 1.5x the pixels of the old 640: small papules survive
+// the downsample instead of turning into a soft blur the detector cannot see.
+const ANALYSIS_WIDTH = 800;
 const HOLD_MS = 420;
 const STEP_TIMEOUT = 9000;
 
@@ -203,6 +207,8 @@ export default function CameraView({ onScanned, onClose }: Props) {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [slow, setSlow] = useState(false);
+  const [warm, setWarm] = useState(true);
+  const warmRef = useRef(true);
 
   facingRef.current = facing;
   aspectRef.current = aspect;
@@ -347,6 +353,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
       const samples: ScanResult[] = [];
       let bestShot = '';
       let bestPose = Number.POSITIVE_INFINITY;
+      let heroIndex = 0;
       const profile = profileRef.current ?? undefined;
 
       try {
@@ -381,6 +388,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
           if (cost < bestPose) {
             bestPose = cost;
             bestShot = canvas.toDataURL('image/jpeg', 0.86);
+            heroIndex = samples.length - 1;
           }
           setProgress((i + 1) / SAMPLES);
         }
@@ -409,7 +417,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
           clarity: Math.round(s.skin.clarity * 1000) / 1000,
         }));
       }
-      const merged = mergeScans(samples, views.length + 1);
+      const merged = mergeScans(samples, views.length + 1, heroIndex);
       onScanned(merged, bestShot);
     },
     [flashHint, onScanned],
@@ -501,6 +509,10 @@ export default function CameraView({ onScanned, onClose }: Props) {
         try {
           const landmarks = detectFace(landmarker, work, now);
           if (landmarks) {
+            if (warmRef.current) {
+              warmRef.current = false;
+              setWarm(false);
+            }
             lastLandmarksRef.current = landmarks;
             targetRef.current.box = faceBox(landmarks);
             lastSeenRef.current = now;
@@ -666,7 +678,15 @@ export default function CameraView({ onScanned, onClose }: Props) {
         </button>
 
         <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/40">
-          {camError ? 'No camera' : scanning ? 'Measuring' : guideDone ? 'Final frame' : `View ${Math.min(step + 1, 5)} of 5`}
+          {camError
+            ? 'No camera'
+            : warm
+              ? 'Starting'
+              : scanning
+                ? 'Measuring'
+                : guideDone
+                  ? 'Final frame'
+                  : `View ${Math.min(step + 1, 5)} of 5`}
         </span>
 
         <button
@@ -699,6 +719,14 @@ export default function CameraView({ onScanned, onClose }: Props) {
             {camError ? (
               <div className="absolute inset-0 grid place-items-center px-6 text-center">
                 <p className="max-w-[260px] text-[13px] leading-relaxed text-white/70">{camError}</p>
+              </div>
+            ) : null}
+
+            {warm && !camError ? (
+              <div className="pointer-events-none absolute inset-0 grid place-items-center">
+                <span className="font-mono text-[9px] uppercase tracking-[0.24em] text-white/55">
+                  Starting camera
+                </span>
               </div>
             ) : null}
 
@@ -737,10 +765,14 @@ export default function CameraView({ onScanned, onClose }: Props) {
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <h1 className="text-[23px] font-black leading-[1.04] tracking-[-0.035em]">
-              {scanning ? 'Measuring' : current.title}
+              {warm ? 'Warming up' : scanning ? 'Measuring' : current.title}
             </h1>
             <p className="mt-1.5 max-w-[250px] text-[12px] leading-snug text-white/45">
-              {slow && !guideDone ? 'Not moving? Tap Skip to keep going.' : current.hint}
+              {warm
+                ? 'Loading the scanner and opening the camera'
+                : slow && !guideDone
+                  ? 'Not moving? Tap Skip to keep going.'
+                  : current.hint}
             </p>
           </div>
           <div className="shrink-0 pt-0.5 text-right">
@@ -795,7 +827,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
             className="grid h-[52px] w-[52px] place-items-center rounded-full text-[9px] font-bold tracking-[0.1em] text-ink transition-colors"
             style={{ background: faceOn ? MINT : 'rgba(255,255,255,0.82)' }}
           >
-            {scanning ? '···' : faceOn ? 'HOLD' : 'FACE'}
+            {warm || scanning ? '···' : faceOn ? 'HOLD' : 'FACE'}
           </span>
         </div>
 

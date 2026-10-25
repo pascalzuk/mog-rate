@@ -8,18 +8,23 @@ Built to be added to the iOS home screen and to look like a native app on a 375Ã
 
 1. The preview runs MediaPipe Face Landmarker (468 mesh points plus iris centres) about 14 times a second and draws a green lock box around your face. A live head-angle readout tells you how far you have turned.
 2. The guide asks for five poses (straight, rotate left, rotate right, chin up, chin down). Each one advances only when the pose is actually reached, with an optional Skip. The last step brings you back to the camera.
-3. The final step samples **six frames** facing forward. Each frame is measured independently and the **median** of every metric is used, so a blink or one bad tracking tick cannot decide the score.
+3. The final step samples **nine frames** facing forward, analysed at 800 px wide. Each frame is measured independently and the **median** of every metric is used, so a blink or one bad tracking tick cannot decide the score.
 4. Landmarks are pose normalised before measuring: the eye line is levelled (roll), then the head turn (yaw) is solved from landmark depth and undone. Vertical spans use 3D distance so a tilted head does not read as a long chin.
-5. Skin is measured from **pixels**, not landmarks: the face oval is sampled, eyes/brows/lips/nostrils are excluded, and the local skin tone is subtracted to find clusters that are redder or darker than their neighbours. Spots are counted as blobs, and both coverage and count move the score.
-6. Everything runs on the device. No API keys, no accounts, no uploads, no server cost, nothing to configure on Vercel.
+5. **Symmetry is a real flip.** The face is warped into a canonical frame (roll, scale and head turn removed), its two halves are compared as edge maps with the mirror axis fitted from the data, and the difference is reported. A face mirrored onto itself measures 0.18; a normal face sits near 0.45; a clearly uneven one is 0.7 and up. Landmark geometry only gets 40% of the weight, because the landmark model has its own symmetry prior and barely notices a narrower cheek.
+6. **Skin is measured from pixels**, in chroma rather than brightness: `(r âˆ’ (g+b)/2) / (r+g+b)`, so a darker room does not read as a calmer face. Two scales catch both papules and broad inflammation, flagged pixels are grouped into blobs, the threshold adapts to the image's own grain (estimated with a median, because a mean gets dragged up by the very spots it should find), and coverage, blob count and sub-threshold redness all move the score.
+7. **Under-eye darkness** compares the band under each lid with the skin at the same height beside it, taking the brighter reference patches so a shadowed cheek or a bit of hair cannot invent a dark circle.
+8. Everything runs on the device. No API keys, no accounts, no uploads, no server cost, nothing to configure on Vercel.
+
+The result includes a **face map**: the captured frame with the midline, the mirrored landmark pairs that sit furthest off it, every counted spot and both under-eye bands drawn over the photo. Tap it to inspect the photo at full size.
 
 ## What gets measured
 
 | Metric | What it looks at |
 | --- | --- |
-| Symmetry | Mirrored landmark pairs against a fitted mirror axis (eyelids, brows and nose tip included), plus a pixel flip that mirrors the face and diffs the halves |
+| Symmetry | A flip test on edge maps with the mirror axis fitted from the data (60%), corroborated by mirrored landmark pairs including eyelids, brows and nose tip (40%) |
 | Jawline | Bigonial width relative to cheekbones, plus the gonial angle |
-| Skin | Spot coverage and count, surface texture, under-eye darkness |
+| Skin | Chroma spot coverage and count, sub-threshold inflammation, surface texture, under-eye darkness against a matched reference |
+| Face map | Midline, pair offsets, spot centres and under-eye bands drawn over the captured frame |
 | Water retention | Lower-face width against face length (puffiness) |
 | Proportions | Lower third against middle third |
 | Midface | Interpupillary distance over eye-to-lip height |

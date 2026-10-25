@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { ArrowClockwise, ArrowsLeftRight, ShareNetwork, X } from '@phosphor-icons/react';
+import { FaceMapCard, FaceMapSheet } from '@/components/FaceMap';
 import type { ScanResult } from '@/lib/faceMetrics';
 
 type Props = {
@@ -15,6 +16,7 @@ const SEVERITY = ['', 'minor', 'notable', 'major'];
 
 export default function ResultView({ result, photo, onAgain, onHome }: Props) {
   const [shared, setShared] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
   // Default to the mirrored view: it is what the user saw in the viewfinder.
   const [mirror, setMirror] = useState(true);
   const pct = Math.max(3, Math.min(100, (result.score / 10) * 100));
@@ -172,6 +174,12 @@ export default function ResultView({ result, photo, onAgain, onHome }: Props) {
           </section>
         ) : null}
 
+        {result.map && photo ? (
+          <section className="mt-4">
+            <FaceMapCard map={result.map} photo={photo} onOpen={() => setMapOpen(true)} />
+          </section>
+        ) : null}
+
         <section className="mt-4">
           <div className="flex items-baseline justify-between border-t border-white/10 pt-3">
             <h2 className="text-[12.5px] font-bold tracking-[-0.01em]">Breakdown</h2>
@@ -239,6 +247,10 @@ export default function ResultView({ result, photo, onAgain, onHome }: Props) {
           </p>
         ) : null}
       </div>
+
+      {mapOpen && result.map && photo ? (
+        <FaceMapSheet map={result.map} photo={photo} onClose={() => setMapOpen(false)} />
+      ) : null}
     </div>
   );
 }

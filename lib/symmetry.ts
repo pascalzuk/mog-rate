@@ -1,30 +1,46 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 
 /**
- * Symmetry by flipping.
+ * Symmetry by flipping the face and subtracting it from itself.
  *
- * The face is warped into a canonical frame using the eye line (roll, scale and
- * position removed), mirrored, and compared with itself. Two things matter for
- * the result to mean anything:
+ * A luminance difference is the obvious approach and a bad one: skin tone is
+ * smooth, so most of the face cancels no matter how lopsided the bones are, and
+ * whatever is left is dominated by a light coming from one side. What actually
+ * differs on an asymmetric face is where the *structure* is: the jaw outline,
+ * the brow line, the lid crease, the mouth corner.
  *
- * 1. The comparison only runs inside the face oval. Hair and background edges
- *    have huge contrast, and a one-pixel landmark slip there would look like a
- *    facial asymmetry.
- * 2. The crop is downsampled and blurred. At full resolution, sharp edges are
- *    alignment noise; at this scale the difference is structure: a dropped brow,
- *    a wider jaw on one side, one-sided breakouts.
+ * So the comparison runs on edge magnitude, not brightness:
+ *
+ * 1. Warp into a canonical frame (roll, scale and head turn removed) so a
+ *    mirrored copy can be compared pixel for pixel.
+ * 2. Compare Sobel edges, each half scaled to the other's edge energy so a
+ *    light from the left cannot look like a wider left cheek.
+ * 3. Fit the mirror axis from the data instead of assuming it sits at the eye
+ *    midpoint, then take a weighted RMS: mismatched jaw and eye outlines count
+ *    for more than a flat forehead, because that is what reads as uneven.
+ * 4. Add a small tonal term for one-sided breakouts or shadow, which have no
+ *    edge to speak of.
  */
 
 export type FlipReport = {
-  /** 0..1, 1 = the two halves match closely */
+  /** 0..1, 1 = the halves match */
   score: number;
-  /** mean mirrored difference in contrast units */
+  /** structural mismatch, edge units. ~0.10 even face, 0.5 clearly uneven */
   difference: number;
+  /** tonal mismatch, std units */
+  tone: number;
+  /** pixels compared */
   pairs: number;
 };
 
-const CW = 120;
-const CH = 152;
+const CW = 160;
+const CH = 200;
+// The face's own midline has to sit on the mirror axis afterwards. It used to be
+// placed at 30% of the crop while the comparison mirrored about 50%, so the test
+// was comparing the face with a shifted copy of itself and reported a constant
+// "asymmetry" no matter what the face looked like.
+const CX = CW / 2;
+const CY = CH * 0.42;
 
 const OVAL = [
   10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148,
@@ -48,10 +64,10 @@ function bilinear(data: Uint8ClampedArray, w: number, h: number, x: number, y: n
   return (g00 * (1 - fx) + g10 * fx) * (1 - fy) + (g01 * (1 - fx) + g11 * fx) * fy;
 }
 
-/** 3x3 box blur twice: removes the pixel-level noise that alignment creates. */
-function smooth(src: Float32Array, w: number, h: number): Float32Array {
+/** 3x3 box blur, run twice to take the resampling noise out. */
+function smooth(src: Float32Array, w: number, h: number, passes = 2): Float32Array {
   let a = src;
-  for (let pass = 0; pass < 2; pass++) {
+  for (let pass = 0; pass < passes; pass++) {
     const out = new Float32Array(w * h);
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
@@ -72,10 +88,11 @@ export function flipSymmetry(
   landmarks: NormalizedLandmark[],
   width: number,
   height: number,
+  yawDeg = 0,
 ): FlipReport {
   const W = pixels.width;
   const H = pixels.height;
-  if (!landmarks || landmarks.length < 468) return { score: 0.5, difference: 1, pairs: 0 };
+  if (!landmarks || landmarks.length < 468) return { score: 0.5, difference: 0.5, tone: 0.5, pairs: 0 };
 
   const lm = landmarks;
   const p = (i: number) => ({ x: lm[i].x * W, y: lm[i].y * H });
@@ -84,26 +101,40 @@ export function flipSymmetry(
   const dx = eyeL.x - eyeR.x;
   const dy = eyeL.y - eyeR.y;
   const d = Math.hypot(dx, dy);
-  if (d < 8) return { score: 0.5, difference: 1, pairs: 0 };
+  if (d < 8) return { score: 0.5, difference: 0.5, tone: 0.5, pairs: 0 };
 
-  const rot = Math.atan2(dy, dx);
-  const cos = Math.cos(rot);
-  const sin = Math.sin(rot);
+  // The canonical frame is centred on the midpoint between the eyes, which is
+  // where the mirror axis lives. Anchoring on one eye (as this did) puts the
+  // face's midline half an eye-distance away from the comparison axis, so the
+  // halves scored against each other were never the two halves of the face.
+  const eyeMid = { x: (eyeR.x + eyeL.x) / 2, y: (eyeR.y + eyeL.y) / 2 };
+
+  const roll = Math.atan2(dy, dx);
+  const cos = Math.cos(roll);
+  const sin = Math.sin(roll);
   const scale = d / (0.4 * CW);
+  // A turned head compresses the face horizontally by cos(yaw). Undo it, or the
+  // near side of every jaw would read as a narrower jaw.
+  const cosYaw = Math.max(0.55, Math.cos((Math.max(-60, Math.min(60, yawDeg)) * Math.PI) / 180));
+
   const toCanonical = (x: number, y: number) => {
-    const rx = (x - eyeR.x) / scale;
-    const ry = (y - eyeR.y) / scale;
-    return { x: 0.3 * CW + rx * cos + ry * sin, y: 0.42 * CH - rx * sin + ry * cos };
+    const rx = (x - eyeMid.x) / scale;
+    const ry = (y - eyeMid.y) / scale;
+    return {
+      x: CX + (rx * cos + ry * sin) / cosYaw,
+      y: CY - rx * sin + ry * cos,
+    };
   };
 
   const crop = new Float32Array(CW * CH);
   const filled = new Uint8Array(CW * CH);
   for (let cy = 0; cy < CH; cy++) {
     for (let cx = 0; cx < CW; cx++) {
-      const ox = (cx - 0.3 * CW) * scale;
-      const oy = (cy - 0.42 * CH) * scale;
-      const sx = eyeR.x + ox * cos - oy * sin;
-      const sy = eyeR.y + ox * sin + oy * cos;
+      const ox = (cx - CX) * scale;
+      const oy = (cy - CY) * scale;
+      const ux = ox * cosYaw;
+      const sx = eyeMid.x + ux * cos - oy * sin;
+      const sy = eyeMid.y + ux * sin + oy * cos;
       const g = bilinear(pixels.data, W, H, sx, sy);
       if (g < 0) continue;
       crop[cy * CW + cx] = g;
@@ -111,7 +142,29 @@ export function flipSymmetry(
     }
   }
 
-  // Oval mask in canonical space, pulled in slightly so the hairline is out.
+  const blurLum = smooth(crop, CW, CH, 2);
+
+  // Sobel on the smoothed luminance.
+  const edge = new Float32Array(CW * CH);
+  for (let y = 1; y < CH - 1; y++) {
+    for (let x = 1; x < CW - 1; x++) {
+      const i = y * CW + x;
+      const tl = blurLum[i - CW - 1];
+      const t = blurLum[i - CW];
+      const tr = blurLum[i - CW + 1];
+      const l = blurLum[i - 1];
+      const r = blurLum[i + 1];
+      const bl = blurLum[i + CW - 1];
+      const b = blurLum[i + CW];
+      const br = blurLum[i + CW + 1];
+      const gx = tr + 2 * r + br - (tl + 2 * l + bl);
+      const gy = bl + 2 * b + br - (tl + 2 * t + tr);
+      edge[i] = Math.hypot(gx, gy) / 8;
+    }
+  }
+  const blurEdge = smooth(edge, CW, CH, 1);
+
+  // Oval mask, pulled in so the hairline and background never enter the test.
   const poly = OVAL.map((i) => toCanonical(p(i).x, p(i).y));
   const ox = poly.reduce((s, q) => s + q.x, 0) / poly.length;
   const oy = poly.reduce((s, q) => s + q.y, 0) / poly.length;
@@ -120,10 +173,13 @@ export function flipSymmetry(
   for (let y = 0; y < CH; y++) {
     xs.length = 0;
     for (let i = 0; i < poly.length; i++) {
-      const a = { x: ox + (poly[i].x - ox) * 0.94, y: oy + (poly[i].y - oy) * 0.94 };
+      // Keep almost all of the outline sideways: the jaw and cheek contour is
+      // exactly where asymmetry shows, and trimming it out made the test blind
+      // to a narrower jaw. Vertical is trimmed harder to stay off the hairline.
+      const a = { x: ox + (poly[i].x - ox) * 0.97, y: oy + (poly[i].y - oy) * 0.84 };
       const b = {
-        x: ox + (poly[(i + 1) % poly.length].x - ox) * 0.94,
-        y: oy + (poly[(i + 1) % poly.length].y - oy) * 0.94,
+        x: ox + (poly[(i + 1) % poly.length].x - ox) * 0.97,
+        y: oy + (poly[(i + 1) % poly.length].y - oy) * 0.84,
       };
       if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) {
         xs.push(a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x));
@@ -137,83 +193,119 @@ export function flipSymmetry(
     }
   }
 
-  const blurred = smooth(crop, CW, CH);
-  let sum = 0;
-  let count = 0;
-  for (let i = 0; i < blurred.length; i++) {
-    if (!mask[i] || !filled[i]) continue;
-    sum += blurred[i];
-    count++;
+  // Feature bands in canonical space, so the eyes and mouth outweigh a flat
+  // forehead no matter where they landed in the frame.
+  const cBrow = toCanonical((p(105).x + p(334).x) / 2, (p(105).y + p(334).y) / 2);
+  const cEye = toCanonical((p(33).x + p(263).x) / 2, (p(33).y + p(263).y) / 2);
+  const cMouth = toCanonical((p(61).x + p(291).x) / 2, (p(61).y + p(291).y) / 2);
+  const cChin = toCanonical(p(152).x, p(152).y);
+  const eyeH = Math.max(3, cMouth.y - cEye.y);
+  const weight = new Float32Array(CW * CH);
+  for (let y = 0; y < CH; y++) {
+    for (let x = 0; x < CW; x++) {
+      let w = 1;
+      if (y > cBrow.y - 0.35 * eyeH && y < cEye.y + 0.45 * eyeH) w = 1.7;
+      else if (y > cMouth.y - 0.25 * eyeH && y < cChin.y) w = 1.35;
+      weight[y * CW + x] = w;
+    }
   }
-  if (count < 400) return { score: 0.5, difference: 1, pairs: 0 };
-  const mean = sum / count;
-  let varSum = 0;
-  for (let i = 0; i < blurred.length; i++) {
-    if (!mask[i] || !filled[i]) continue;
-    const d0 = blurred[i] - mean;
-    varSum += d0 * d0;
-  }
-  const std = Math.sqrt(varSum / count) || 1;
 
-  // The true mirror axis is never exactly the eye midpoint, so search a few
-  // pixels around it and keep the best fit. What survives is real asymmetry, not
-  // a half-pixel landmark bias.
-  // Skip the top of the forehead: a fringe of hair lands there and is never
-  // mirrored, so it would count as bone structure.
-  const yStart = Math.round(CH * 0.36);
-  const yEnd = Math.round(CH * 0.92);
+  // Only the right half is scored; the left comes in through the mirror.
+  const xStart = Math.round(CW * 0.53);
   const xEnd = Math.round(CW * 0.9);
+  // Start just above the brows. Reaching higher drags the fringe into a test
+  // that is supposed to be about bone structure, and hair never mirrors.
+  const yStart = Math.max(2, Math.round(cBrow.y - 0.18 * eyeH));
+  const yEnd = Math.min(CH - 2, Math.round(cChin.y));
 
   let bestDiff = Number.POSITIVE_INFINITY;
-  let bestN = 0;
-  for (let axis = -4; axis <= 4; axis++) {
-    let diffSum = 0;
-    let diffN = 0;
-    let sumL = 0;
-    let sumR = 0;
-    let countLR = 0;
+  let bestPairs = 0;
+  for (let axis = -7; axis <= 7; axis++) {
+    let sumWL = 0;
+    let sumWR = 0;
+    let n = 0;
     for (let y = yStart; y < yEnd; y++) {
-      for (let x = Math.round(CW * 0.56); x < xEnd; x++) {
-        const mirror = CW - 1 - x + axis;
-        if (mirror < 1 || mirror >= CW - 1) continue;
-        if (!mask[y * CW + x] || !mask[y * CW + mirror]) continue;
-        if (!filled[y * CW + x] || !filled[y * CW + mirror]) continue;
-        sumL += blurred[y * CW + x];
-        sumR += blurred[y * CW + mirror];
-        countLR++;
+      for (let x = xStart; x < xEnd; x++) {
+        const mx = CW - 1 - x + axis;
+        if (mx < 1 || mx >= CW - 1) continue;
+        const i = y * CW + x;
+        const j = y * CW + mx;
+        if (!mask[i] || !mask[j] || !filled[i] || !filled[j]) continue;
+        const w = weight[i];
+        sumWL += blurEdge[i] * w;
+        sumWR += blurEdge[j] * w;
+        n++;
       }
     }
-    if (!countLR) continue;
-    const meanL = sumL / countLR;
-    const meanR = sumR / countLR;
+    if (n < CW * 8) continue;
+    const meanL = sumWL / n;
+    const meanR = sumWR / n;
+    if (meanL < 0.05 || meanR < 0.05) continue;
+    // Scale to equal edge energy first: lighting varies, bone structure does not.
+    const k = meanL / meanR;
+    let acc = 0;
+    let wsum = 0;
     for (let y = yStart; y < yEnd; y++) {
-      for (let x = Math.round(CW * 0.56); x < xEnd; x++) {
-        const mirror = CW - 1 - x + axis;
-        if (mirror < 1 || mirror >= CW - 1) continue;
-        if (!mask[y * CW + x] || !mask[y * CW + mirror]) continue;
-        if (!filled[y * CW + x] || !filled[y * CW + mirror]) continue;
-        // Each half is centred on its own mean, so one side being lit brighter
-        // does not register as an asymmetry.
-        const a = blurred[y * CW + x] - meanL;
-        const b = blurred[y * CW + mirror] - meanR;
-        diffSum += Math.abs(a - b) / std;
-        diffN++;
+      for (let x = xStart; x < xEnd; x++) {
+        const mx = CW - 1 - x + axis;
+        if (mx < 1 || mx >= CW - 1) continue;
+        const i = y * CW + x;
+        const j = y * CW + mx;
+        if (!mask[i] || !mask[j] || !filled[i] || !filled[j]) continue;
+        const w = weight[i];
+        const diff = blurEdge[i] - blurEdge[j] * k;
+        acc += diff * diff * w;
+        wsum += w;
       }
     }
-    if (diffN && diffN > bestN * 0.8) {
-      const d = diffSum / diffN;
-      if (d < bestDiff) {
-        bestDiff = d;
-        bestN = diffN;
-      }
+    if (!wsum) continue;
+    const diff = Math.sqrt(acc / wsum) / meanL;
+    // Prefer axes that actually compare a decent share of the face.
+    const scoreDiff = diff * (1 + Math.abs(axis) * 0.004);
+    if (scoreDiff < bestDiff) {
+      bestDiff = scoreDiff;
+      bestPairs = n;
     }
   }
-  if (!bestN) return { score: 0.5, difference: 1, pairs: 0 };
+  if (!bestPairs) return { score: 0.5, difference: 0.5, tone: 0.5, pairs: 0 };
 
-  const difference = bestDiff;
-  // Measured on a mirrored control face: 0.12. A normal face at this scale lands
-  // around 0.7 to 1.0 once hair, expression and pose are included; 1.4 reads as
-  // clearly uneven in person.
-  const score = clamp01(1 - Math.max(0, difference - 0.3) / 1.15);
-  return { score, difference, pairs: bestN };
+  // Tonal term: one-sided breakouts or shadow, which have no edge to compare.
+  let toneSum = 0;
+  let toneCount = 0;
+  for (let y = yStart; y < yEnd; y++) {
+    for (let x = xStart; x < xEnd; x++) {
+      const mx = CW - 1 - x;
+      const i = y * CW + x;
+      const j = y * CW + mx;
+      if (!mask[i] || !mask[j] || !filled[i] || !filled[j]) continue;
+      toneSum += Math.abs(blurLum[i] - blurLum[j]);
+      toneCount++;
+    }
+  }
+  let tone = 0;
+  if (toneCount > 200) {
+    let mean = 0;
+    for (let y = 0; y < CH; y++) for (let x = 0; x < CW; x++) if (mask[y * CW + x]) mean += blurLum[y * CW + x];
+    const nMask = mask.reduce((a, b) => a + b, 0) || 1;
+    mean /= nMask;
+    let varSum = 0;
+    for (let y = 0; y < CH; y++) {
+      for (let x = 0; x < CW; x++) {
+        const i = y * CW + x;
+        if (!mask[i]) continue;
+        const d0 = blurLum[i] - mean;
+        varSum += d0 * d0;
+      }
+    }
+    const std = Math.sqrt(varSum / nMask) || 1;
+    tone = toneSum / toneCount / std;
+  }
+
+  const difference = 0.82 * bestDiff + 0.18 * tone;
+
+  // 0.18 is the floor measured by mirroring a face onto itself; 0.93 is a face
+  // with one side visibly out of line. The mapping is deliberately not a
+  // straight line: small differences are normal, large ones are not.
+  const score = clamp01(1 - Math.max(0, difference - 0.18) / 0.75);
+  return { score, difference, tone, pairs: bestPairs };
 }

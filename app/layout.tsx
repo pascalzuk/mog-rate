@@ -9,7 +9,9 @@ export const metadata: Metadata = {
   manifest: '/manifest.webmanifest',
   appleWebApp: {
     capable: true,
-    statusBarStyle: 'black-translucent',
+    // Opaque, not translucent: translucent lets the page run under the iOS
+    // status bar, which is what made the top strip look smeared.
+    statusBarStyle: 'black',
     title: 'Mog',
   },
   icons: {

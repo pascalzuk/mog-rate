@@ -1,5 +1,5 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
-import { analyzeSkin, type SkinReport } from '@/lib/skinAnalysis';
+import { analyzeSkin, type SkinReport, type SpotMark, type UnderEyeMark } from '@/lib/skinAnalysis';
 import { flipSymmetry, type FlipReport } from '@/lib/symmetry';
 
 export type MetricKey =
@@ -41,6 +41,19 @@ export type SkinSummary = {
   spots: number;
   measured: boolean;
   regions: Record<string, number>;
+  marks: { spots: SpotMark[]; underEyes: UnderEyeMark[] };
+};
+
+export type FaceMap = {
+  width: number;
+  height: number;
+  /** glabella → nose tip → subnasale → lip → chin, normalised */
+  midline: Pt[];
+  /** fitted mirror axis, normalised x */
+  axisX: number;
+  pairs: { a: Pt; b: Pt; off: number }[];
+  spots: { x: number; y: number; r: number }[];
+  underEyes: { x: number; y: number; rx: number; ry: number; darkness: number }[];
 };
 
 export type RawMeasures = {
@@ -69,6 +82,8 @@ export type ScanResult = {
   confidence: number;
   skin: SkinSummary;
   raw: RawMeasures;
+  /** normalised marks from the frame that produced the photo */
+  map?: FaceMap;
   /** frames that contributed to the final frontal read */
   frames: number;
   /** guided views captured before the read */
@@ -119,14 +134,14 @@ const L = {
 const WEIGHTS: Record<MetricKey, number> = {
   symmetry: 0.15,
   jawline: 0.14,
-  skin: 0.17,
+  skin: 0.2,
   puffiness: 0.07,
   thirds: 0.08,
   midface: 0.09,
   canthal: 0.08,
-  eyes: 0.07,
-  fwhr: 0.07,
-  lips: 0.08,
+  eyes: 0.06,
+  fwhr: 0.06,
+  lips: 0.07,
 };
 
 const LABELS: Record<MetricKey, string> = {
@@ -257,6 +272,7 @@ type Measures = {
   scores: Record<MetricKey, number>;
   skin: SkinReport | null;
   flip: FlipReport | null;
+  map: FaceMap;
   pose: HeadPose;
   symmetryDev: number;
   jawRatio: number;
@@ -294,14 +310,15 @@ function chinProjectionFrom(profile: { landmarks: NormalizedLandmark[] }): numbe
 }
 
 export function symmetryScore(deviation: number, flipDifference: number | null): number {
-  // Landmarks are the reliable signal. A perfectly even face lands near 0.010;
-  // 0.035 is noticeable in person; 0.060 reads as clearly uneven.
-  const geom = clamp01(1 - Math.max(0, deviation - 0.01) / 0.05);
+  // Landmarks are the weaker signal: the landmark model has its own symmetry
+  // prior and barely moves on a face with one cheek narrower than the other.
+  // A perfectly even face lands near 0.010; 0.030 is noticeable in person.
+  const geom = clamp01(1 - Math.max(0, deviation - 0.012) / 0.045);
   if (flipDifference === null) return geom;
-  // The pixel flip only corroborates: at this crop size even a mirrored control
-  // face shows about 0.40 of difference from resampling, so 0.40 is the floor.
-  const flip = clamp01(1 - Math.max(0, flipDifference - 0.4) / 0.45);
-  return 0.7 * geom + 0.3 * flip;
+  // The flip comparison is the real test. A face mirrored onto itself measures
+  // 0.18 here; a normal face lands near 0.45; 0.75 reads as clearly uneven.
+  const flip = clamp01(1 - Math.max(0, flipDifference - 0.18) / 0.75);
+  return 0.4 * geom + 0.6 * flip;
 }
 
 export function measure(frame: Frame): Measures {
@@ -379,7 +396,7 @@ export function measure(frame: Frame): Measures {
 
   const flip =
     frame.pixels && frame.pixels.width > 0
-      ? flipSymmetry(frame.pixels, landmarks, width, height)
+      ? flipSymmetry(frame.pixels, landmarks, width, height, pose.yaw)
       : null;
   const symmetry = symmetryScore(symmetryDev, flip?.difference ?? null);
 
@@ -441,7 +458,29 @@ export function measure(frame: Frame): Measures {
   const lips = 0.55 * band(lipRatio, 0.45, 0.62, 0.16) + 0.45 * band(mouthNose, 1.45, 1.62, 0.2);
 
   const skin = frame.pixels ? analyzeSkin(frame.pixels, landmarks, width, height) : null;
-  const skinScore = skin ? clamp01(0.72 * skin.clarity + 0.18 * skin.texture + 0.1 * skin.underEyes) : 0;
+  const skinScore = skin
+    ? clamp01(0.62 * skin.clarity + 0.16 * skin.texture + 0.22 * skin.underEyes)
+    : 0;
+
+  // Marks for the face map, straight from the frame that was measured.
+  const fittedAxis =
+    PAIRS.reduce((sum, [a, b, w]) => sum + ((p(a).x + p(b).x) / 2) * w, 0) / PAIR_WEIGHT;
+  const faceMap: FaceMap = {
+    width,
+    height,
+    midline: [L.glabella, L.noseTip, L.subnasale, L.lipTop, L.chin].map((i) => ({
+      x: landmarks[i].x,
+      y: landmarks[i].y,
+    })),
+    axisX: fittedAxis / width,
+    pairs: PAIRS.map(([a, b]) => ({
+      a: { x: landmarks[a].x, y: landmarks[a].y },
+      b: { x: landmarks[b].x, y: landmarks[b].y },
+      off: Math.abs(2 * fittedAxis - p(a).x - p(b).x) / rawFaceWidth,
+    })),
+    spots: skin?.marks.spots ?? [],
+    underEyes: skin?.marks.underEyes ?? [],
+  };
 
   return {
     scores: {
@@ -458,6 +497,7 @@ export function measure(frame: Frame): Measures {
     },
     skin,
     flip,
+    map: faceMap,
     pose,
     symmetryDev,
     jawRatio,
@@ -513,16 +553,18 @@ function buildFlags(m: Measures, skinMeasured: boolean): Flag[] {
     flags.push({
       key: 'symmetry',
       label: 'Asymmetry',
-      detail: m.flip
-        ? `${Math.round((1 - m.flip.score) * 100)}% mismatch between your left and right halves`
-        : `${(m.symmetryDev * 100).toFixed(1)}% offset between mirrored features`,
+      detail: (() => {
+        const offs = m.map.pairs.map((pair) => pair.off);
+        const mean = offs.length ? offs.reduce((a, b) => a + b, 0) / offs.length : m.symmetryDev;
+        return `${(mean * 100).toFixed(1)}% average offset between mirrored features`;
+      })(),
       severity: s.symmetry < 0.45 ? 3 : s.symmetry < 0.62 ? 2 : 1,
       kind: 'face',
     });
   }
 
   if (m.skin && skinMeasured) {
-    if (m.skin.clarity < 0.85) {
+    if (m.skin.clarity < 0.72) {
       const spots = m.skin.spots;
       const ranked = Object.entries(m.skin.regions).sort((a, b) => b[1] - a[1]);
       const where = ranked[0] && ranked[0][1] > 0 ? regionName(ranked[0][0]) : 'face';
@@ -533,9 +575,9 @@ function buildFlags(m: Measures, skinMeasured: boolean): Flag[] {
           ? `${spots} ${spots === 1 ? 'spot' : 'spots'}, worst on the ${where}`
           : `${Math.round(m.skin.blemishShare * 100)}% of skin affected`,
         severity:
-          m.skin.spots >= 10 || m.skin.clarity < 0.3
+          m.skin.clarity < 0.35 || m.skin.spots >= 14
             ? 3
-            : m.skin.spots >= 4 || m.skin.clarity < 0.55
+            : m.skin.clarity < 0.55 || m.skin.spots >= 7
               ? 2
               : 1,
         kind: 'face',
@@ -550,12 +592,15 @@ function buildFlags(m: Measures, skinMeasured: boolean): Flag[] {
         kind: 'face',
       });
     }
-    if (m.skin.underEyes < 0.42) {
+    if (m.skin.underEyes < 0.6) {
       flags.push({
         key: 'under-eyes',
-        label: 'Under-eye shadow',
-        detail: 'Lower lids read darker than the cheeks',
-        severity: m.skin.underEyes < 0.3 ? 2 : 1,
+        label: 'Dark circles',
+        detail:
+          m.skin.underEyes < 0.35
+            ? 'The band under the lids is clearly darker than the skin beside it'
+            : 'Under-eyes read darker than the temples',
+        severity: m.skin.underEyes < 0.25 ? 2 : 1,
         kind: 'face',
       });
     }
@@ -645,7 +690,7 @@ function grade(m: Measures, frames: number, views: number): ScanResult {
   // asymmetric face, so those cap the ceiling instead of averaging away.
   // Skin is the first thing anyone sees, so a breakout caps the ceiling instead
   // of quietly averaging against eight good ratios.
-  if (skinMeasured) score = Math.min(score, 9.6 - (1 - m.scores.skin) * 10);
+  if (skinMeasured) score = Math.min(score, 9.6 - (1 - m.scores.skin) * 8.5);
   score = Math.min(score, 9.8 - (1 - m.scores.symmetry) * 3.6);
   score = Math.min(score, 9.8 - (1 - m.scores.jawline) * 1.4);
 
@@ -703,6 +748,7 @@ function grade(m: Measures, frames: number, views: number): ScanResult {
     metrics,
     flags,
     pose,
+    map: m.map,
     confidence: Math.round(confidence * 100) / 100,
     skin: {
       clarity: m.skin?.clarity ?? 0.55,
@@ -712,6 +758,7 @@ function grade(m: Measures, frames: number, views: number): ScanResult {
       spots: m.skin?.spots ?? 0,
       measured: skinMeasured,
       regions: (m.skin?.regions ?? {}) as Record<string, number>,
+      marks: m.skin?.marks ?? { spots: [], underEyes: [] },
     },
     raw: {
       symmetryDev: m.symmetryDev,
@@ -740,7 +787,7 @@ export function analyzeFace(frame: Frame, views = 1): ScanResult {
  * Live scan: several frontal frames are measured independently and the median of
  * every metric is used, so a blink or a bad tracking tick cannot swing the read.
  */
-export function mergeScans(results: ScanResult[], views = 1): ScanResult {
+export function mergeScans(results: ScanResult[], views = 1, heroIndex = 0): ScanResult {
   if (!results.length) throw new Error('No frames captured');
   if (results.length === 1) return { ...results[0], views };
 
@@ -762,6 +809,7 @@ export function mergeScans(results: ScanResult[], views = 1): ScanResult {
         lighting: 0.8,
         samples: 1000,
         notes: [],
+        marks: withSkin[0].skin.marks,
       }
     : null;
 
@@ -779,8 +827,14 @@ export function mergeScans(results: ScanResult[], views = 1): ScanResult {
   const merged: Measures = {
     scores,
     skin,
+    map: results[heroIndex]?.map ?? results[0].map!,
     flip: flipDifference
-      ? { score: clamp01(1 - Math.max(0, flipDifference - 0.15) / 0.95), difference: flipDifference, pairs: 0 }
+      ? {
+          score: clamp01(1 - Math.max(0, flipDifference - 0.18) / 0.75),
+          difference: flipDifference,
+          tone: 0,
+          pairs: 0,
+        }
       : null,
     pose: bestPose.pose,
     symmetryDev,
