@@ -63,7 +63,8 @@ export default function ResultView({ result, photo, onAgain, onHome }: Props) {
     >
       <header className="safe-top flex items-center justify-between px-5 pb-1">
         <span className="font-mono text-[8.5px] uppercase tracking-[0.16em] text-white/25">
-          {result.views === 1 ? 'Photo' : `${result.views} views`} · {result.frames} frames
+          {result.views === 1 ? 'Photo' : `${result.views} views`} · {result.frames}{' '}
+          {result.frames === 1 ? 'frame' : 'frames'}
         </span>
         <button
           type="button"

@@ -20,6 +20,7 @@ type View = { landmarks: NormalizedLandmark[]; width: number; height: number };
 
 type Props = {
   onScanned: (result: ScanResult, photo: string) => void;
+  onUpload: () => void;
   onClose: () => void;
 };
 
@@ -163,7 +164,7 @@ function drawOverlay(
   }
 }
 
-export default function CameraView({ onScanned, onClose }: Props) {
+export default function CameraView({ onScanned, onUpload, onClose }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const stageHostRef = useRef<HTMLDivElement | null>(null);
@@ -190,7 +191,6 @@ export default function CameraView({ onScanned, onClose }: Props) {
   const viewsRef = useRef<View[]>([]);
   const scanningRef = useRef(false);
   const doneRef = useRef(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
   const hintTimer = useRef<number | null>(null);
 
   const [facing, setFacing] = useState<'user' | 'environment'>('user');
@@ -609,53 +609,6 @@ export default function CameraView({ onScanned, onClose }: Props) {
     };
   }, [modelReady, advance, runScan]);
 
-  const onPickFile = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      event.target.value = '';
-      if (!file) return;
-      setScanning(true);
-      setProgress(0.4);
-      try {
-        const landmarker = await loadFaceLandmarker();
-        const url = URL.createObjectURL(file);
-        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = () => reject(new Error('Could not read that photo'));
-          i.src = url;
-        });
-        const w = ANALYSIS_WIDTH;
-        const h = Math.max(1, Math.round((w * img.naturalHeight) / img.naturalWidth));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const c = canvas.getContext('2d', { willReadFrequently: true });
-        if (!c) throw new Error('Canvas unavailable');
-        c.drawImage(img, 0, 0, w, h);
-        URL.revokeObjectURL(url);
-
-        const landmarks = detectFace(landmarker, canvas, performance.now());
-        if (!landmarks) {
-          setScanning(false);
-          setProgress(0);
-          flashHint('No face found in that photo.');
-          return;
-        }
-        const pixels = c.getImageData(0, 0, w, h);
-        setProgress(0.9);
-        const result = analyzeFace({ landmarks, width: w, height: h, pixels }, 1);
-        doneRef.current = true;
-        onScanned(result, canvas.toDataURL('image/jpeg', 0.86));
-      } catch {
-        setScanning(false);
-        setProgress(0);
-        flashHint('Could not read that photo. Try another.');
-      }
-    },
-    [flashHint, onScanned],
-  );
-
   const current = STEPS[step];
   const ring = ((step + hold) / (STEPS.length - 1)) * 100;
   const arrows = [null, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, null];
@@ -801,9 +754,9 @@ export default function CameraView({ onScanned, onClose }: Props) {
       <div className="safe-bottom flex items-center justify-between px-7 pb-1 pt-3">
         <button
           type="button"
-          onClick={() => fileRef.current?.click()}
+          onClick={onUpload}
           disabled={scanning}
-          aria-label="Choose a photo instead"
+          aria-label="Upload a photo instead"
           className="grid h-11 w-11 place-items-center rounded-full border border-white/10 text-white/55 active:scale-95 disabled:opacity-40"
         >
           <ImageSquare size={19} />
@@ -842,7 +795,6 @@ export default function CameraView({ onScanned, onClose }: Props) {
         </button>
       </div>
 
-      <input ref={fileRef} type="file" accept="image/*" onChange={onPickFile} className="hidden" />
     </div>
   );
 }

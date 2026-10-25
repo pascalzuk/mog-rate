@@ -7,6 +7,7 @@ import HomeView from '@/components/HomeView';
 import ResultView from '@/components/ResultView';
 import type { ScanResult } from '@/lib/faceMetrics';
 import { loadFaceLandmarker } from '@/lib/faceLandmarker';
+import { scanPhoto } from '@/lib/photoScan';
 
 type Phase = 'home' | 'camera' | 'analyzing' | 'result';
 
@@ -14,7 +15,9 @@ export default function MogApp() {
   const [phase, setPhase] = useState<Phase>('home');
   const [result, setResult] = useState<ScanResult | null>(null);
   const [photo, setPhoto] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     // Start the ~3.6 MB model + WASM download while the user is still reading
@@ -24,6 +27,33 @@ export default function MogApp() {
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
+  }, []);
+
+  const openPicker = useCallback(() => {
+    setNotice(null);
+    fileRef.current?.click();
+  }, []);
+
+  const onFile = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setNotice(null);
+    setPhoto('');
+    setPhase('analyzing');
+    try {
+      const scan = await scanPhoto(file);
+      setResult(scan.result);
+      setPhoto(scan.photo);
+      if (timer.current) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => {
+        setPhase('result');
+        window.scrollTo({ top: 0 });
+      }, 700);
+    } catch (err) {
+      setPhase('home');
+      setNotice(err instanceof Error ? err.message : 'Could not read that photo.');
+    }
   }, []);
 
   const handleScanned = useCallback((next: ScanResult, shot: string) => {
@@ -48,7 +78,9 @@ export default function MogApp() {
         style={{ height: 'env(safe-area-inset-top)' }}
       />
 
-      {phase === 'home' ? <HomeView onScan={() => setPhase('camera')} /> : null}
+      {phase === 'home' ? (
+        <HomeView onScan={() => setPhase('camera')} onUpload={openPicker} notice={notice} />
+      ) : null}
 
       {phase === 'result' && result ? (
         <ResultView
@@ -60,10 +92,16 @@ export default function MogApp() {
       ) : null}
 
       {phase === 'camera' ? (
-        <CameraView onScanned={handleScanned} onClose={() => setPhase('home')} />
+        <CameraView
+          onScanned={handleScanned}
+          onUpload={openPicker}
+          onClose={() => setPhase('home')}
+        />
       ) : null}
 
       {phase === 'analyzing' ? <AnalyzingView photo={photo} /> : null}
+
+      <input ref={fileRef} type="file" accept="image/*" onChange={onFile} className="hidden" />
     </main>
   );
 }

@@ -63,7 +63,7 @@ The model (~3.6 MB) and the MediaPipe WASM runtime are served from `public/` wit
 ## Notes and limits
 
 - Camera framing asks for a tall stream and caps the preview crop, so the preview is not blown up the way a square or 16:9 request looks on a portrait iPhone. If the browser still hands back a wide stream, the stage stays a portrait window rather than cropping to a sliver.
-- Photo fallback: if camera permission is blocked, the same analysis runs on an image from the library.
+- Upload a photo: the button on the home screen (and the library button in the camera) runs the same measurement on any image you pick, at the same analysis width. It is one read rather than nine, so the confidence is lower and the header says Photo. HEIC from an iPhone library is decoded by Safari; very large images are downscaled before measuring, never upscaled.
 - Skin readings are less reliable in poor light, and the result says so when the capture quality is low.
 - Nothing scrolls on the camera screen. The shutter sits above the safe area on every phone down to a 375×667 SE, using `100dvh` rather than `inset-0`, which iOS otherwise stretches under the browser bar.
 - Nothing is stored. Results live in memory for the session.

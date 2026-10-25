@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowRight } from '@phosphor-icons/react';
+import { ArrowRight, ImageSquare } from '@phosphor-icons/react';
 import InstallPrompt from '@/components/InstallPrompt';
 
 const SIGNALS = [
@@ -16,7 +16,15 @@ const SIGNALS = [
   'Lips',
 ];
 
-export default function HomeView({ onScan }: { onScan: () => void }) {
+export default function HomeView({
+  onScan,
+  onUpload,
+  notice,
+}: {
+  onScan: () => void;
+  onUpload: () => void;
+  notice?: string | null;
+}) {
   return (
     <div className="flex min-h-[100dvh] flex-col bg-ink px-5">
       <header className="safe-top flex items-baseline justify-between pb-2">
@@ -49,13 +57,28 @@ export default function HomeView({ onScan }: { onScan: () => void }) {
         <button
           type="button"
           onClick={onScan}
-          className="mt-6 flex h-[54px] w-full items-center justify-between rounded-full bg-signal pl-6 pr-2 text-ink transition active:scale-[0.99]"
+          className="mt-5 flex h-[54px] w-full items-center justify-between rounded-full bg-signal pl-6 pr-2 text-ink transition active:scale-[0.99]"
         >
           <span className="text-[13px] font-black uppercase tracking-[0.1em]">Start scan</span>
           <span className="grid h-[42px] w-[42px] place-items-center rounded-full bg-ink text-signal">
             <ArrowRight size={17} weight="bold" />
           </span>
         </button>
+
+        <button
+          type="button"
+          onClick={onUpload}
+          className="mt-2 flex h-[46px] w-full items-center justify-center gap-2 rounded-full border border-white/12 text-[11px] font-bold uppercase tracking-[0.1em] text-white/65 transition active:bg-white/5"
+        >
+          <ImageSquare size={15} weight="bold" />
+          Upload a photo
+        </button>
+
+        {notice ? (
+          <p className="mt-2 text-[11px] leading-snug text-signal" role="status">
+            {notice}
+          </p>
+        ) : null}
       </section>
 
       <section className="pb-2">
