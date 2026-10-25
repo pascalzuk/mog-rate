@@ -1,13 +1,22 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowsClockwise, ImageSquare, X } from '@phosphor-icons/react';
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  ArrowsClockwise,
+  ImageSquare,
+  X,
+} from '@phosphor-icons/react';
 import type { FaceLandmarker, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { detectFace, loadFaceLandmarker } from '@/lib/faceLandmarker';
-import { analyzeFace, mergeScans } from '@/lib/faceMetrics';
-import type { ScanResult } from '@/lib/faceMetrics';
+import { analyzeFace, estimatePose, mergeScans } from '@/lib/faceMetrics';
+import type { HeadPose, ScanResult } from '@/lib/faceMetrics';
 
 type Box = { x: number; y: number; w: number; h: number };
+type View = { landmarks: NormalizedLandmark[]; width: number; height: number };
 
 type Props = {
   onScanned: (result: ScanResult, photo: string) => void;
@@ -15,9 +24,21 @@ type Props = {
 };
 
 const MINT = '#4cff9b';
-const SAMPLES = 7;
-const SAMPLE_GAP = 130;
+const SAMPLES = 6;
+const SAMPLE_GAP = 120;
 const ANALYSIS_WIDTH = 640;
+const HOLD_MS = 420;
+const STEP_TIMEOUT = 9000;
+
+const STEPS = [
+  { key: 'front', title: 'Look straight', hint: 'Chin level, eyes on the lens' },
+  { key: 'side1', title: 'Rotate left', hint: 'Turn until you feel the stretch' },
+  { key: 'side2', title: 'Rotate right', hint: 'Sweep past centre to the other side' },
+  { key: 'tilt1', title: 'Chin up', hint: 'Hold it for a beat' },
+  { key: 'tilt2', title: 'Chin down', hint: 'Almost there' },
+  { key: 'scan', title: 'Face the camera', hint: 'Hold still while it reads you' },
+] as const;
+
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -32,42 +53,28 @@ function faceBox(landmarks: NormalizedLandmark[]): Box {
     if (p.x > maxX) maxX = p.x;
     if (p.y > maxY) maxY = p.y;
   }
-  const padX = (maxX - minX) * 0.06;
-  const padY = (maxY - minY) * 0.06;
+  const padX = (maxX - minX) * 0.05;
+  const padY = (maxY - minY) * 0.05;
   const x = Math.max(0, minX - padX);
   const y = Math.max(0, minY - padY);
   return { x, y, w: Math.min(1, maxX + padX) - x, h: Math.min(1, maxY + padY) - y };
 }
 
-function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  const radius = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.arcTo(x + w, y, x + w, y + h, radius);
-  ctx.arcTo(x + w, y + h, x, y + h, radius);
-  ctx.arcTo(x, y + h, x, y, radius);
-  ctx.arcTo(x, y, x + w, y, radius);
-  ctx.closePath();
-}
-
 function drawOverlay(
   canvas: HTMLCanvasElement,
   video: HTMLVideoElement | null,
-  current: { box: Box | null; ratio: number },
+  smooth: { box: Box | null; ratio: number },
   target: { box: Box | null },
   mirrored: boolean,
-  scanning: boolean,
+  active: boolean,
 ) {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
   if (!cw || !ch) return;
-
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const pw = Math.round(cw * dpr);
-  const ph = Math.round(ch * dpr);
-  if (canvas.width !== pw || canvas.height !== ph) {
-    canvas.width = pw;
-    canvas.height = ph;
+  if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
   }
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -75,35 +82,25 @@ function drawOverlay(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cw, ch);
 
-  const prev = current.box;
+  const prev = smooth.box;
   const next = target.box;
   const eased = next
     ? prev
       ? {
-          x: prev.x + (next.x - prev.x) * 0.24,
-          y: prev.y + (next.y - prev.y) * 0.24,
-          w: prev.w + (next.w - prev.w) * 0.24,
-          h: prev.h + (next.h - prev.h) * 0.24,
+          x: prev.x + (next.x - prev.x) * 0.26,
+          y: prev.y + (next.y - prev.y) * 0.26,
+          w: prev.w + (next.w - prev.w) * 0.26,
+          h: prev.h + (next.h - prev.h) * 0.26,
         }
       : { ...next }
     : null;
-  current.box = eased;
+  smooth.box = eased;
 
   if (!eased || !video || !video.videoWidth) {
-    current.ratio = 0;
-    // Idle guide: an oval where the face should go.
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([7, 9]);
-    ctx.beginPath();
-    ctx.ellipse(cw / 2, ch / 2, cw * 0.31, ch * 0.34, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
+    smooth.ratio = 0;
     return;
   }
 
-  // object-cover mapping from video space to the on-screen stage
   const scale = Math.max(cw / video.videoWidth, ch / video.videoHeight);
   const dw = video.videoWidth * scale;
   const dh = video.videoHeight * scale;
@@ -116,95 +113,104 @@ function drawOverlay(
   const h = eased.h * dh;
   if (mirrored) x = cw - x - w;
 
-  const inset = 14;
+  const inset = 10;
   const left = Math.max(inset, x);
   const top = Math.max(inset, y);
-  const bw = Math.max(56, Math.min(cw - inset, x + w) - left);
-  const bh = Math.max(56, Math.min(ch - inset, y + h) - top);
-  current.ratio = bh / ch;
-  const corner = Math.min(bw, bh) * 0.2;
-  const radius = Math.min(bw, bh) * 0.16;
+  const bw = Math.max(48, Math.min(cw - inset, x + w) - left);
+  const bh = Math.max(48, Math.min(ch - inset, y + h) - top);
+  smooth.ratio = bh / ch;
+
+  const radius = Math.min(bw, bh) * 0.14;
+  const corner = Math.min(bw, bh) * 0.18;
 
   ctx.save();
-  roundedRect(ctx, left, top, bw, bh, radius);
-  ctx.fillStyle = scanning ? 'rgba(76, 255, 155, 0.12)' : 'rgba(76, 255, 155, 0.05)';
-  ctx.fill();
-  ctx.strokeStyle = scanning ? 'rgba(76, 255, 155, 0.75)' : 'rgba(76, 255, 155, 0.24)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.save();
-  ctx.strokeStyle = MINT;
-  ctx.lineWidth = scanning ? 4 : 3;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.shadowColor = 'rgba(76, 255, 155, 0.7)';
-  ctx.shadowBlur = scanning ? 20 : 12;
-  const corners: Array<[number, number, number, number]> = [
-    [left, top, 1, 1],
-    [left + bw, top, -1, 1],
-    [left, top + bh, 1, -1],
-    [left + bw, top + bh, -1, -1],
-  ];
-  for (const [cx, cy, dx, dy] of corners) {
-    ctx.beginPath();
-    ctx.moveTo(cx + dx * corner, cy);
-    ctx.lineTo(cx, cy);
-    ctx.lineTo(cx, cy + dy * corner);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // centre tick marks, so the box reads as a viewfinder rather than a sticker
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-  ctx.lineWidth = 1;
-  const cx = left + bw / 2;
-  const cy = top + bh / 2;
   ctx.beginPath();
-  ctx.moveTo(cx - 7, cy);
-  ctx.lineTo(cx + 7, cy);
-  ctx.moveTo(cx, cy - 7);
-  ctx.lineTo(cx, cy + 7);
+  ctx.moveTo(left + radius, top);
+  ctx.arcTo(left + bw, top, left + bw, top + bh, radius);
+  ctx.arcTo(left + bw, top + bh, left, top + bh, radius);
+  ctx.arcTo(left, top + bh, left, top, radius);
+  ctx.arcTo(left, top, left + bw, top, radius);
+  ctx.closePath();
+  ctx.strokeStyle = active ? 'rgba(76,255,155,0.55)' : 'rgba(255,255,255,0.28)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash(active ? [] : [5, 6]);
   ctx.stroke();
   ctx.restore();
+
+  if (active) {
+    ctx.save();
+    ctx.strokeStyle = MINT;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    const cs: Array<[number, number, number, number]> = [
+      [left, top, 1, 1],
+      [left + bw, top, -1, 1],
+      [left, top + bh, 1, -1],
+      [left + bw, top + bh, -1, -1],
+    ];
+    for (const [cx, cy, dx, dy] of cs) {
+      ctx.beginPath();
+      ctx.moveTo(cx + dx * corner, cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + dy * corner);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 }
 
 export default function CameraView({ onScanned, onClose }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const stageHostRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const landmarkerRef = useRef<FaceLandmarker | null>(null);
   const rafRef = useRef(0);
   const smoothRef = useRef<{ box: Box | null; ratio: number }>({ box: null, ratio: 0 });
   const targetRef = useRef<{ box: Box | null }>({ box: null });
-  const distRef = useRef<'far' | 'good' | 'close' | null>(null);
   const lastSeenRef = useRef(0);
   const lastDetectRef = useRef(0);
   const lastVideoTimeRef = useRef(-1);
+  const lastLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const faceOnRef = useRef(false);
+  const profileRef = useRef<View | null>(null);
+  const poseRef = useRef<HeadPose>({ yaw: 0, roll: 0, pitch: 0 });
+  const basePoseRef = useRef<HeadPose | null>(null);
   const facingRef = useRef<'user' | 'environment'>('user');
+  const aspectRef = useRef(0.75);
+  const stepRef = useRef(0);
+  const holdStartRef = useRef(0);
+  const stepStartRef = useRef(0);
+  const sideSignRef = useRef(0);
+  const tiltSignRef = useRef(0);
+  const viewsRef = useRef<View[]>([]);
   const scanningRef = useRef(false);
+  const doneRef = useRef(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const hintTimer = useRef<number | null>(null);
 
   const [facing, setFacing] = useState<'user' | 'environment'>('user');
-  const [stageAspect, setStageAspect] = useState(0.74);
+  const [aspect, setAspect] = useState(0.75);
+  const [stage, setStage] = useState({ w: 0, h: 0 });
   const [modelReady, setModelReady] = useState(false);
   const [faceOn, setFaceOn] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  const [step, setStep] = useState(0);
+  const [hold, setHold] = useState(0);
+  const [yawNow, setYawNow] = useState(0);
+  const yawStateRef = useRef(0);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [distance, setDistance] = useState<'far' | 'good' | 'close' | null>(null);
+  const [slow, setSlow] = useState(false);
 
   facingRef.current = facing;
+  aspectRef.current = aspect;
 
   const flashHint = useCallback((message: string) => {
     setHint(message);
     if (hintTimer.current) window.clearTimeout(hintTimer.current);
-    hintTimer.current = window.setTimeout(() => setHint(null), 3200);
+    hintTimer.current = window.setTimeout(() => setHint(null), 3000);
   }, []);
 
   useEffect(() => {
@@ -227,24 +233,19 @@ export default function CameraView({ onScanned, onClose }: Props) {
     let cancelled = false;
     setCamError(null);
     setFaceOn(false);
-    faceOnRef.current = false;
     targetRef.current.box = null;
     smoothRef.current.box = null;
     smoothRef.current.ratio = 0;
-    distRef.current = null;
-    setDistance(null);
 
-    const open = async (constraints: MediaStreamConstraints) =>
-      navigator.mediaDevices.getUserMedia(constraints);
+    const open = (constraints: MediaStreamConstraints) => navigator.mediaDevices.getUserMedia(constraints);
 
     const start = async () => {
       try {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
         streamRef.current?.getTracks().forEach((t) => t.stop());
 
-        // Ask for a tall frame. A square or 16:9 track is what made the old
-        // preview feel zoomed: cropping a wide sensor into a portrait screen
-        // shows only the middle quarter of the image.
+        // Tall request on purpose: a square or 16:9 track is what makes a
+        // portrait preview look zoomed, because cover crops away most of it.
         let stream: MediaStream;
         try {
           stream = await open({
@@ -268,13 +269,13 @@ export default function CameraView({ onScanned, onClose }: Props) {
       } catch (err) {
         if (cancelled) return;
         const name = (err as { name?: string })?.name;
-        if (name === 'NotAllowedError') {
-          setCamError('Camera access is off. Allow it in Settings, or use a photo instead.');
-        } else if (name === 'NotFoundError') {
-          setCamError('No camera found. Use a photo from your library instead.');
-        } else {
-          setCamError('Could not open the camera. Use a photo instead.');
-        }
+        setCamError(
+          name === 'NotAllowedError'
+            ? 'Camera access is off. Allow it in Settings, or use a photo.'
+            : name === 'NotFoundError'
+              ? 'No camera found. Use a photo instead.'
+              : 'Could not open the camera. Use a photo instead.',
+        );
       }
     };
 
@@ -292,15 +293,180 @@ export default function CameraView({ onScanned, onClose }: Props) {
     };
   }, []);
 
+  // Size the viewfinder to whatever space is left, so nothing ever needs a scroll.
+  useEffect(() => {
+    const host = stageHostRef.current;
+    if (!host) return;
+    const resize = () => {
+      const rect = host.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const ar = clamp(aspectRef.current, 0.62, 0.95);
+      let w = Math.min(rect.width, rect.height * ar);
+      let h = w / ar;
+      if (h > rect.height) {
+        h = rect.height;
+        w = h * ar;
+      }
+      setStage({ w: Math.round(w), h: Math.round(h) });
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [aspect]);
+
   const onLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return;
-    const aspect = video.videoWidth / video.videoHeight;
-    // Never show less than about half of the sensor's horizontal field.
-    setStageAspect(clamp(aspect, 0.66, 0.95));
+    setAspect(clamp(video.videoWidth / video.videoHeight, 0.62, 0.95));
   }, []);
 
-  // Live tracking loop: detect ~14x/sec, draw the lock box every animation frame.
+  const runScan = useCallback(
+    async (views: View[]) => {
+      if (scanningRef.current || doneRef.current) return;
+      scanningRef.current = true;
+      setScanning(true);
+      setProgress(0);
+
+      const video = videoRef.current;
+      const landmarker = landmarkerRef.current;
+      if (!video || !landmarker || video.readyState < 2) {
+        scanningRef.current = false;
+        setScanning(false);
+        flashHint('Camera is still warming up.');
+        return;
+      }
+
+      const canvas = document.createElement('canvas');
+      const w = ANALYSIS_WIDTH;
+      const h = Math.max(1, Math.round((w * video.videoHeight) / video.videoWidth));
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+      const samples: ScanResult[] = [];
+      let bestShot = '';
+      let bestPose = Number.POSITIVE_INFINITY;
+      const profile = profileRef.current ?? undefined;
+
+      try {
+        for (let i = 0; i < SAMPLES; i++) {
+          await wait(i === 0 ? 60 : SAMPLE_GAP);
+          if (!ctx || video.readyState < 2) continue;
+          ctx.drawImage(video, 0, 0, w, h);
+          let landmarks: NormalizedLandmark[] | null = null;
+          try {
+            landmarks = detectFace(landmarker, canvas, performance.now());
+          } catch {
+            continue;
+          }
+          if (!landmarks) continue;
+
+          // Every frame gets pixels: skipping some would mix symmetry scores
+          // measured with the flip test and without it, and the median would
+          // then disagree with the reported flip number.
+          const pixels = ctx.getImageData(0, 0, w, h);
+          let result: ScanResult;
+          try {
+            result = analyzeFace(
+              { landmarks, width: w, height: h, pixels, profile: profile ? { ...profile } : undefined },
+              views.length + 1,
+            );
+          } catch {
+            continue;
+          }
+          samples.push(result);
+
+          const cost = Math.abs(result.pose.yaw) + Math.abs(result.pose.pitch);
+          if (cost < bestPose) {
+            bestPose = cost;
+            bestShot = canvas.toDataURL('image/jpeg', 0.86);
+          }
+          setProgress((i + 1) / SAMPLES);
+        }
+      } finally {
+        scanningRef.current = false;
+      }
+
+      if (samples.length < 3) {
+        doneRef.current = false;
+        setScanning(false);
+        setProgress(0);
+        stepRef.current = 5;
+        setStep(5);
+        holdStartRef.current = 0;
+        flashHint('Lost your face. Hold still and try again.');
+        return;
+      }
+
+      doneRef.current = true;
+      if (!bestShot && ctx) bestShot = canvas.toDataURL('image/jpeg', 0.86);
+      if ((window as unknown as { __MOG_DEBUG?: boolean }).__MOG_DEBUG) {
+        (window as unknown as { __mogFrames?: unknown }).__mogFrames = samples.map((s) => ({
+          flip: Math.round(s.raw.flipDifference * 1000) / 1000,
+          dev: Math.round(s.raw.symmetryDev * 10000) / 10000,
+          sym: Math.round((s.metrics.find((m) => m.key === 'symmetry')?.score ?? 0) * 1000) / 1000,
+          clarity: Math.round(s.skin.clarity * 1000) / 1000,
+        }));
+      }
+      const merged = mergeScans(samples, views.length + 1);
+      onScanned(merged, bestShot);
+    },
+    [flashHint, onScanned],
+  );
+
+  const captureView = useCallback((): View | null => {
+    const video = videoRef.current;
+    const landmarker = landmarkerRef.current;
+    if (!video || !landmarker || video.readyState < 2) return null;
+    const w = ANALYSIS_WIDTH;
+    const h = Math.max(1, Math.round((w * video.videoHeight) / video.videoWidth));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, w, h);
+    const landmarks = detectFace(landmarker, canvas, performance.now());
+    return landmarks ? { landmarks, width: w, height: h } : null;
+  }, []);
+
+  const advance = useCallback(
+    (index: number, pose: HeadPose) => {
+      const view = captureView();
+      if (view) {
+        if (index === 1 || index === 2) {
+          viewsRef.current.push(view);
+          if (!profileRef.current) profileRef.current = view;
+        }
+      }
+      const base = basePoseRef.current ?? pose;
+      if (index === 1) sideSignRef.current = Math.sign(pose.yaw - base.yaw);
+      if (index === 3) tiltSignRef.current = Math.sign(pose.pitch - base.pitch);
+
+      const next = Math.min(STEPS.length - 1, index + 1);
+      stepRef.current = next;
+      setStep(next);
+      holdStartRef.current = 0;
+      stepStartRef.current = performance.now();
+      setHold(0);
+      setSlow(false);
+      if (next === STEPS.length - 1) flashHint('Head straight, hold still');
+    },
+    [captureView, flashHint],
+  );
+
+  const skipGuide = useCallback(() => {
+    if (scanning || doneRef.current) return;
+    stepRef.current = STEPS.length - 1;
+    setStep(STEPS.length - 1);
+    holdStartRef.current = 0;
+    stepStartRef.current = performance.now();
+    setHold(0);
+    flashHint('Guided views skipped');
+  }, [scanning, flashHint]);
+
+  // Detection + guide loop
   useEffect(() => {
     if (!modelReady) return;
     let stopped = false;
@@ -320,7 +486,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
         ctx &&
         video.readyState >= 2 &&
         video.videoWidth > 0 &&
-        now - lastDetectRef.current > 80 &&
+        now - lastDetectRef.current > 75 &&
         video.currentTime !== lastVideoTimeRef.current
       ) {
         lastDetectRef.current = now;
@@ -335,13 +501,72 @@ export default function CameraView({ onScanned, onClose }: Props) {
         try {
           const landmarks = detectFace(landmarker, work, now);
           if (landmarks) {
+            lastLandmarksRef.current = landmarks;
             targetRef.current.box = faceBox(landmarks);
             lastSeenRef.current = now;
+            poseRef.current = estimatePose(landmarks, video.videoWidth / video.videoHeight);
+            if ((window as unknown as { __MOG_DEBUG?: boolean }).__MOG_DEBUG) {
+              (window as unknown as { __mogPose?: unknown }).__mogPose = {
+                yaw: Math.round(poseRef.current.yaw),
+                pitch: Math.round(poseRef.current.pitch),
+              };
+            }
+
+            if (!scanningRef.current && !doneRef.current) {
+              const index = stepRef.current;
+              const pose = poseRef.current;
+              // Everything is relative to the pose the user arrived in, because
+              // a landmark model always carries a few degrees of its own bias.
+              if (!basePoseRef.current) basePoseRef.current = pose;
+              const base = basePoseRef.current;
+              const dy = pose.yaw - base.yaw;
+              const rel = Math.round(dy);
+              if (Math.abs(rel - yawStateRef.current) >= 3) {
+                yawStateRef.current = rel;
+                setYawNow(rel);
+              }
+              const dp = pose.pitch - base.pitch;
+              const front = Math.abs(dy) < 12 && Math.abs(dp) < 12;
+              const matches =
+                index === 0
+                  ? front
+                  : index === 1
+                    ? Math.abs(dy) > 15
+                    : index === 2
+                      ? Math.abs(dy) > 15 && Math.sign(dy) !== sideSignRef.current
+                      : index === 3
+                        ? Math.abs(dp) > 8
+                        : index === 4
+                          ? Math.abs(dp) > 8 && Math.sign(dp) !== tiltSignRef.current
+                          : front;
+
+              if (matches) {
+                if (!holdStartRef.current) holdStartRef.current = now;
+                const p = (now - holdStartRef.current) / HOLD_MS;
+                setHold((prev) => (Math.abs(prev - p) > 0.1 || p >= 1 ? Math.min(1, p) : prev));
+                if (p >= 1) {
+                  if (index === 5) {
+                    setHold(1);
+                    void runScan([...viewsRef.current]);
+                  } else {
+                    advance(index, pose);
+                  }
+                }
+              } else if (holdStartRef.current) {
+                holdStartRef.current = 0;
+                setHold(0);
+              }
+
+              if (now - stepStartRef.current > STEP_TIMEOUT) {
+                setSlow((prev) => (prev ? prev : true));
+              }
+            }
           } else if (now - lastSeenRef.current > 700) {
             targetRef.current.box = null;
+            holdStartRef.current = 0;
           }
         } catch {
-          // dropped frame, next tick retries
+          // dropped frame
         }
       }
 
@@ -352,27 +577,14 @@ export default function CameraView({ onScanned, onClose }: Props) {
           smoothRef.current,
           targetRef.current,
           facingRef.current === 'user',
-          scanningRef.current,
+          performance.now() - lastSeenRef.current < 500,
         );
       }
 
-      const locked = performance.now() - lastSeenRef.current < 520;
+      const locked = performance.now() - lastSeenRef.current < 500;
       if (locked !== faceOnRef.current) {
         faceOnRef.current = locked;
         setFaceOn(locked);
-      }
-
-      const ratio = smoothRef.current.ratio;
-      const nextDist: 'far' | 'good' | 'close' | null = !locked
-        ? null
-        : ratio < 0.3
-          ? 'far'
-          : ratio > 0.82
-            ? 'close'
-            : 'good';
-      if (nextDist !== distRef.current) {
-        distRef.current = nextDist;
-        setDistance(nextDist);
       }
 
       rafRef.current = requestAnimationFrame(frame);
@@ -383,80 +595,7 @@ export default function CameraView({ onScanned, onClose }: Props) {
       stopped = true;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [modelReady]);
-
-  const scan = useCallback(async () => {
-    if (scanningRef.current) return;
-    const video = videoRef.current;
-    const landmarker = landmarkerRef.current;
-    if (!video || !landmarker || video.readyState < 2 || !video.videoWidth) {
-      flashHint('Camera is still warming up.');
-      return;
-    }
-    if (!faceOnRef.current) {
-      flashHint('Line your face up in the box first.');
-      return;
-    }
-
-    scanningRef.current = true;
-    setScanning(true);
-    setProgress(0);
-
-    const canvas = document.createElement('canvas');
-    const w = ANALYSIS_WIDTH;
-    const h = Math.max(1, Math.round((w * video.videoHeight) / video.videoWidth));
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-    const samples: ScanResult[] = [];
-    let bestShot = '';
-    let bestPose = Number.POSITIVE_INFINITY;
-
-    try {
-      for (let i = 0; i < SAMPLES; i++) {
-        await wait(i === 0 ? 40 : SAMPLE_GAP);
-        if (!ctx || video.readyState < 2) continue;
-        ctx.drawImage(video, 0, 0, w, h);
-        let landmarks: NormalizedLandmark[] | null = null;
-        try {
-          landmarks = detectFace(landmarker, canvas, performance.now());
-        } catch {
-          continue;
-        }
-        if (!landmarks) continue;
-
-        const pixels = ctx.getImageData(0, 0, w, h);
-        let result: ScanResult;
-        try {
-          result = analyzeFace({ landmarks, width: w, height: h, pixels });
-        } catch {
-          continue;
-        }
-        samples.push(result);
-
-        const poseCost = result.pose.yaw + result.pose.roll;
-        if (poseCost < bestPose) {
-          bestPose = poseCost;
-          bestShot = canvas.toDataURL('image/jpeg', 0.86);
-        }
-        setProgress((i + 1) / SAMPLES);
-      }
-    } finally {
-      scanningRef.current = false;
-    }
-
-    if (samples.length < 3) {
-      setScanning(false);
-      setProgress(0);
-      flashHint('Lost your face mid-scan. Hold still and try again.');
-      return;
-    }
-
-    if (!bestShot && ctx) bestShot = canvas.toDataURL('image/jpeg', 0.86);
-    const merged = mergeScans(samples);
-    onScanned(merged, bestShot);
-  }, [flashHint, onScanned]);
+  }, [modelReady, advance, runScan]);
 
   const onPickFile = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -474,8 +613,6 @@ export default function CameraView({ onScanned, onClose }: Props) {
           i.onerror = () => reject(new Error('Could not read that photo'));
           i.src = url;
         });
-        // Same working width as the live path, so a photo and a camera frame of
-        // the same face produce comparable pixel statistics.
         const w = ANALYSIS_WIDTH;
         const h = Math.max(1, Math.round((w * img.naturalHeight) / img.naturalWidth));
         const canvas = document.createElement('canvas');
@@ -495,7 +632,9 @@ export default function CameraView({ onScanned, onClose }: Props) {
         }
         const pixels = c.getImageData(0, 0, w, h);
         setProgress(0.9);
-        onScanned(analyzeFace({ landmarks, width: w, height: h, pixels }), canvas.toDataURL('image/jpeg', 0.86));
+        const result = analyzeFace({ landmarks, width: w, height: h, pixels }, 1);
+        doneRef.current = true;
+        onScanned(result, canvas.toDataURL('image/jpeg', 0.86));
       } catch {
         setScanning(false);
         setProgress(0);
@@ -505,163 +644,170 @@ export default function CameraView({ onScanned, onClose }: Props) {
     [flashHint, onScanned],
   );
 
-  const status = camError
-    ? 'CAMERA UNAVAILABLE'
-    : !modelReady
-      ? 'LOADING SCANNER'
-      : scanning
-        ? `MEASURING ${Math.round(progress * SAMPLES)}/${SAMPLES}`
-        : faceOn
-          ? 'FACE LOCKED'
-          : 'LOOKING FOR FACE';
+  const current = STEPS[step];
+  const ring = ((step + hold) / (STEPS.length - 1)) * 100;
+  const arrows = [null, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, null];
+  const Arrow = arrows[step];
+  const guideDone = step === STEPS.length - 1;
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col bg-ink text-bone">
-      <header className="safe-top relative z-20 flex items-center justify-between px-5 pb-3 pt-2">
+    // Height comes from 100dvh rather than inset-0 alone: on iOS the layout
+    // viewport runs under the browser chrome, so an inset-0 fixed screen pushes
+    // the shutter below the fold. 100dvh tracks the visible area.
+    <div className="fixed inset-x-0 top-0 z-40 flex flex-col overflow-hidden bg-ink text-bone" style={{ height: '100dvh' }}>
+      <header className="safe-top flex items-center justify-between px-4 pb-1">
         <button
           type="button"
           aria-label="Close camera"
           onClick={onClose}
-          className="grid h-10 w-10 place-items-center rounded-full border border-white/12 bg-white/[0.04] text-white/80 transition active:scale-95"
+          className="grid h-9 w-9 place-items-center text-white/70 active:scale-95"
         >
           <X size={17} weight="bold" />
         </button>
 
-        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${faceOn ? 'bg-mint' : camError ? 'bg-red-400' : 'bg-white/40'}`}
-            style={faceOn ? { boxShadow: '0 0 8px #4cff9b' } : undefined}
-          />
-          <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/60">{status}</span>
-        </div>
+        <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/40">
+          {camError ? 'No camera' : scanning ? 'Measuring' : guideDone ? 'Final frame' : `View ${Math.min(step + 1, 5)} of 5`}
+        </span>
 
-        <div className="h-10 w-10" aria-hidden />
+        <button
+          type="button"
+          onClick={skipGuide}
+          disabled={scanning || guideDone || !!camError}
+          className="h-9 px-1 font-mono text-[10px] uppercase tracking-[0.14em] text-white/40 active:text-white disabled:opacity-25"
+        >
+          Skip
+        </button>
       </header>
 
-      <div className="relative z-10 flex flex-1 flex-col px-4 pt-1">
-        <div
-          className="relative w-full shrink-0 overflow-hidden rounded-[26px] bg-black ring-1 ring-white/10"
-          style={{ aspectRatio: String(stageAspect) }}
-        >
-          <video
-            ref={videoRef}
-            onLoadedMetadata={onLoadedMetadata}
-            className="absolute inset-0 h-full w-full object-cover"
-            style={{ transform: facing === 'user' ? 'scaleX(-1)' : undefined }}
-            playsInline
-            muted
-            autoPlay
-          />
-          <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" />
+      <div ref={stageHostRef} className="relative min-h-0 flex-1 px-3">
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div
+            className="relative overflow-hidden rounded-[22px] bg-black ring-1 ring-white/10"
+            style={{ width: stage.w || undefined, height: stage.h || undefined }}
+          >
+            <video
+              ref={videoRef}
+              onLoadedMetadata={onLoadedMetadata}
+              className="absolute inset-0 h-full w-full object-cover"
+              style={{ transform: facing === 'user' ? 'scaleX(-1)' : undefined }}
+              playsInline
+              muted
+              autoPlay
+            />
+            <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" />
 
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/55 to-transparent" />
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-black/70 to-transparent" />
-
-          {camError ? (
-            <div className="absolute inset-0 grid place-items-center px-8 text-center">
-              <p className="max-w-[280px] text-[13px] leading-relaxed text-white/70">{camError}</p>
-            </div>
-          ) : null}
-
-          {hint ? (
-            <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center px-6">
-              <div className="rounded-full bg-bone px-4 py-2 text-[12px] font-semibold text-ink shadow-xl">
-                {hint}
+            {camError ? (
+              <div className="absolute inset-0 grid place-items-center px-6 text-center">
+                <p className="max-w-[260px] text-[13px] leading-relaxed text-white/70">{camError}</p>
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          {scanning ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/45 backdrop-blur-[1px]">
-              <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-mint">Hold still</p>
-              <p className="mt-2 font-mono text-[34px] font-bold tabular-nums leading-none text-bone">
-                {Math.round(progress * 100)}%
-              </p>
-              <p className="mt-3 max-w-[220px] text-center text-[11px] leading-relaxed text-white/50">
-                Sampling {SAMPLES} frames and measuring each one
-              </p>
-            </div>
-          ) : null}
+            {hint ? (
+              <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center px-5">
+                <span className="rounded-full bg-bone px-3.5 py-1.5 text-[11px] font-semibold text-ink shadow-lg">
+                  {hint}
+                </span>
+              </div>
+            ) : null}
 
-          <div className="absolute inset-x-0 bottom-3 flex justify-center">
-            <p className="rounded-full bg-black/45 px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.24em] text-white/60 backdrop-blur-sm">
-              {faceOn ? 'Locked, tap to scan' : 'Fill the box with your face'}
-            </p>
-          </div>
-        </div>
+            {Arrow && !scanning && !camError ? (
+              <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+                <span className="flex items-center gap-2 bg-black/45 px-3 py-1.5 text-white/70 backdrop-blur-sm">
+                  <Arrow size={13} weight="bold" />
+                  <span className="font-mono text-[8.5px] uppercase tracking-[0.16em]">
+                    {step === 1 ? 'Left' : step === 2 ? 'Right' : step === 3 ? 'Up' : 'Down'}
+                  </span>
+                </span>
+              </div>
+            ) : null}
 
-        <div className="mt-5 grid grid-cols-3 gap-3 border-t border-white/10 px-1 pt-4">
-          <div>
-            <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-white/25">Face</p>
-            <p className={`mt-1 text-[11px] font-semibold ${faceOn ? 'text-mint' : 'text-white/40'}`}>
-              {faceOn ? 'In frame' : 'Searching'}
-            </p>
-          </div>
-          <div>
-            <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-white/25">Distance</p>
-            <p
-              className={`mt-1 text-[11px] font-semibold ${
-                distance === 'good' ? 'text-mint' : distance ? 'text-white/70' : 'text-white/40'
-              }`}
-            >
-              {distance === 'good'
-                ? 'Good'
-                : distance === 'far'
-                  ? 'Move closer'
-                  : distance === 'close'
-                    ? 'Step back'
-                    : 'Waiting'}
-            </p>
-          </div>
-          <div>
-            <p className="font-mono text-[8px] uppercase tracking-[0.18em] text-white/25">Light</p>
-            <p className="mt-1 text-[11px] font-semibold text-white/40">Face a window</p>
+            {scanning ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/55">
+                <p className="font-mono text-[9px] uppercase tracking-[0.26em] text-mint">Hold still</p>
+                <p className="mt-2 text-[36px] font-black leading-none tabular-nums tracking-[-0.03em]">
+                  {Math.round(progress * 100)}%
+                </p>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
 
-      <div className="safe-bottom relative z-10 mt-auto px-6 pb-2 pt-6">
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={scanning}
-            aria-label="Choose a photo instead"
-            className="grid h-12 w-12 place-items-center rounded-full border border-white/12 text-white/60 transition active:scale-95 disabled:opacity-40"
-          >
-            <ImageSquare size={20} />
-          </button>
-
-          <button
-            type="button"
-            onClick={scan}
-            disabled={scanning || !modelReady || !!camError}
-            aria-label="Scan my face"
-            className="relative grid h-[76px] w-[76px] place-items-center rounded-full transition active:scale-95 disabled:opacity-50"
-          >
-            <span
-              className="absolute inset-0 rounded-full border-2 transition-colors"
-              style={{ borderColor: faceOn ? MINT : 'rgba(255,255,255,0.3)' }}
-            />
-            <span
-              className="absolute inset-[7px] rounded-full transition-colors"
-              style={{ background: faceOn ? MINT : 'rgba(255,255,255,0.75)' }}
-            />
-            <span className="relative font-mono text-[10px] font-bold tracking-[0.12em] text-ink">
-              {scanning ? '···' : 'SCAN'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            aria-label="Switch camera"
-            disabled={scanning}
-            onClick={() => setFacing((f) => (f === 'user' ? 'environment' : 'user'))}
-            className="grid h-12 w-12 place-items-center rounded-full border border-white/12 text-white/60 transition active:scale-95 disabled:opacity-40"
-          >
-            <ArrowsClockwise size={20} weight="bold" />
-          </button>
+      <div className="px-5 pt-2">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-[23px] font-black leading-[1.04] tracking-[-0.035em]">
+              {scanning ? 'Measuring' : current.title}
+            </h1>
+            <p className="mt-1.5 max-w-[250px] text-[12px] leading-snug text-white/45">
+              {slow && !guideDone ? 'Not moving? Tap Skip to keep going.' : current.hint}
+            </p>
+          </div>
+          <div className="shrink-0 pt-0.5 text-right">
+            <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-white/25">Head</p>
+            <p className="mt-0.5 text-[16px] font-bold leading-none tabular-nums text-white/80">
+              {scanning ? '···' : `${yawNow > 0 ? '+' : ''}${yawNow}°`}
+            </p>
+          </div>
         </div>
+
+        <div className="mt-3 flex gap-1">
+          {[0, 1, 2, 3, 4].map((i) => {
+            const fill = i < step ? 1 : i === step ? Math.min(1, hold) : 0;
+            return (
+              <span key={i} className="h-[2px] flex-1 overflow-hidden bg-white/12">
+                <span
+                  className="block h-full bg-mint transition-[width] duration-100"
+                  style={{ width: `${(step > i ? 1 : fill) * 100}%` }}
+                />
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="safe-bottom flex items-center justify-between px-7 pb-1 pt-3">
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={scanning}
+          aria-label="Choose a photo instead"
+          className="grid h-11 w-11 place-items-center rounded-full border border-white/10 text-white/55 active:scale-95 disabled:opacity-40"
+        >
+          <ImageSquare size={19} />
+        </button>
+
+        <div className="relative grid h-[68px] w-[68px] place-items-center" aria-hidden>
+          <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full -rotate-90">
+            <circle cx="50" cy="50" r="46" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="1.5" />
+            <circle
+              cx="50"
+              cy="50"
+              r="46"
+              fill="none"
+              stroke={MINT}
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeDasharray={`${(ring / 100) * 289} 289`}
+            />
+          </svg>
+          <span
+            className="grid h-[52px] w-[52px] place-items-center rounded-full text-[9px] font-bold tracking-[0.1em] text-ink transition-colors"
+            style={{ background: faceOn ? MINT : 'rgba(255,255,255,0.82)' }}
+          >
+            {scanning ? '···' : faceOn ? 'HOLD' : 'FACE'}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          aria-label="Switch camera"
+          disabled={scanning}
+          onClick={() => setFacing((f) => (f === 'user' ? 'environment' : 'user'))}
+          className="grid h-11 w-11 place-items-center rounded-full border border-white/10 text-white/55 active:scale-95 disabled:opacity-40"
+        >
+          <ArrowsClockwise size={19} weight="bold" />
+        </button>
       </div>
 
       <input ref={fileRef} type="file" accept="image/*" onChange={onPickFile} className="hidden" />

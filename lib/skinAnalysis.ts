@@ -1,33 +1,33 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 
 /**
- * Skin is measured from pixels, not landmarks: landmarks can tell you where the
- * cheek is, but not whether there is a breakout on it. This module samples the
- * actual frame inside the face oval, subtracts the local skin tone, and looks
- * for clusters of pixels that are both redder and darker than their neighbours.
- * Freckles, moles, stubble and shadows are all real signals, so the thresholds
- * below are deliberately conservative: a flagged cluster has to survive a coarse
- * grid test, which filters out single-pixel noise and JPEG speckle.
+ * Skin is measured from pixels. Landmarks locate the face; pixels decide whether
+ * there is a breakout on it.
+ *
+ * Two scales are used on purpose. A five-pixel pimple disappears under a blur
+ * sized to the whole cheek, while a broad inflamed patch disappears under a
+ * five-pixel one. So the sampler keeps a fine baseline (for papules) and a coarse
+ * baseline (for diffuse redness), then groups flagged pixels into blobs and only
+ * counts blobs large enough to be a real spot. The thresholds adapt to the
+ * image's own noise floor, because a phone frame and a recompressed photo do not
+ * have the same grain.
  */
 
 export type SkinRegion = 'forehead' | 'left' | 'right' | 'chin';
 
 export type SkinReport = {
-  /** 0..1, 1 = clear skin */
+  /** 0..1, 1 = clear */
   clarity: number;
-  /** 0..1, 1 = smooth surface */
+  /** 0..1, 1 = smooth */
   texture: number;
   /** 0..1, 1 = no dark circles */
   underEyes: number;
-  /** share of measured skin cells that flagged as blemished */
+  /** share of measured skin pixels inside a counted spot */
   blemishShare: number;
-  /** number of flagged cells */
-  clusters: number;
-  /** share of flagged cells by area of the face */
+  /** number of distinct spot clusters */
+  spots: number;
   regions: Record<SkinRegion, number>;
-  /** 0..1 capture quality, low means dark / blown out / too small */
   lighting: number;
-  /** usable skin pixels */
   samples: number;
   notes: string[];
 };
@@ -41,10 +41,6 @@ type P = { x: number; y: number };
 type Box = { x0: number; y0: number; x1: number; y1: number };
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-
-function toPts(landmarks: NormalizedLandmark[], w: number, h: number): P[] {
-  return landmarks.map((l) => ({ x: l.x * w, y: l.y * h }));
-}
 
 function bbox(points: P[]): Box {
   let x0 = Infinity;
@@ -71,7 +67,6 @@ function pad(box: Box, fx: number, top: number, bottom: number): Box {
   };
 }
 
-/** Scanline fill of the face oval into a 1-byte mask. */
 function fillPolygon(mask: Uint8Array, w: number, h: number, poly: P[]) {
   const xs: number[] = [];
   for (let y = 0; y < h; y++) {
@@ -103,7 +98,7 @@ function carve(mask: Uint8Array, w: number, h: number, box: Box) {
   }
 }
 
-/** Separable box blur, clamped at the edges. Approximates the local skin tone. */
+/** Separable box blur, clamped at the edges. Approximates local skin tone. */
 function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Array {
   const tmp = new Float32Array(w * h);
   const out = new Float32Array(w * h);
@@ -130,11 +125,11 @@ function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Arr
 
 function emptyReport(lighting = 0): SkinReport {
   return {
-    clarity: 0.6,
+    clarity: 0.55,
     texture: 0.6,
     underEyes: 0.7,
     blemishShare: 0,
-    clusters: 0,
+    spots: 0,
     regions: { forehead: 0, left: 0, right: 0, chin: 0 },
     lighting,
     samples: 0,
@@ -151,15 +146,14 @@ export function analyzeSkin(
   const W = pixels.width;
   const H = pixels.height;
   const data = pixels.data;
-  if (!landmarks || landmarks.length < 468 || W < 32 || H < 32) return emptyReport();
+  if (!landmarks || landmarks.length < 468 || W < 48 || H < 48) return emptyReport();
 
-  const pts = toPts(landmarks, W, H);
+  const pts: P[] = landmarks.map((l) => ({ x: l.x * W, y: l.y * H }));
   const p = (i: number) => pts[i] ?? pts[0];
 
-  const faceW = Math.max(12, Math.hypot(p(234).x - p(454).x, p(234).y - p(454).y));
+  const faceW = Math.max(16, Math.hypot(p(234).x - p(454).x, p(234).y - p(454).y));
   const oval = OVAL.map((i) => p(i));
-  // Pull the sampling area 6% inside the face outline: the hairline and jaw
-  // edges carry colour fringing that reads as blemishes if you sample them.
+  // Stay 5% inside the outline: the hairline and jaw edge carry colour fringing.
   const cx = oval.reduce((s, q) => s + q.x, 0) / oval.length;
   const cy = oval.reduce((s, q) => s + q.y, 0) / oval.length;
   const mask = new Uint8Array(W * H);
@@ -167,11 +161,9 @@ export function analyzeSkin(
     mask,
     W,
     H,
-    oval.map((q) => ({ x: cx + (q.x - cx) * 0.94, y: cy + (q.y - cy) * 0.94 })),
+    oval.map((q) => ({ x: cx + (q.x - cx) * 0.95, y: cy + (q.y - cy) * 0.95 })),
   );
 
-  // Never measure eyes, brows, lips or nostrils: they are dark by design and
-  // would be read as a breakout on almost every face.
   const eyeR = bbox([p(33), p(133), p(159), p(145), p(130)]);
   const eyeL = bbox([p(362), p(263), p(386), p(374), p(359)]);
   carve(mask, W, H, pad(eyeR, 0.16, 1.05, 0.3));
@@ -189,106 +181,142 @@ export function analyzeSkin(
     red[i] = r - (g + b) / 2;
   }
 
-  const radius = Math.max(2, Math.round(faceW * 0.032));
-  const blurLum = boxBlur(lum, W, H, radius);
-  const blurRed = boxBlur(red, W, H, radius);
+  const rFine = Math.max(2, Math.round(faceW * 0.014));
+  const rCoarse = Math.max(4, Math.round(faceW * 0.05));
+  const fineLum = boxBlur(lum, W, H, rFine);
+  const fineRed = boxBlur(red, W, H, rFine);
+  const coarseLum = boxBlur(lum, W, H, rCoarse);
+  const coarseRed = boxBlur(red, W, H, rCoarse);
 
-  const cell = Math.max(4, Math.round(faceW / 24));
-  const cols = Math.ceil(W / cell);
-  const rows = Math.ceil(H / cell);
-  const skinCells = new Int32Array(cols * rows);
-  const flagCells = new Int32Array(cols * rows);
+  // Noise floor from the image itself, so grain and compression do not read as
+  // blemishes and genuinely sharp photos are not over-smoothed.
+  let noiseSum = 0;
+  let noiseN = 0;
+  let lumSum = 0;
+  let samples = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (!mask[i]) continue;
+    if (lum[i] < 22 || lum[i] > 250) continue;
+    samples++;
+    lumSum += lum[i];
+    noiseSum += Math.abs(lum[i] - fineLum[i]);
+    noiseN++;
+  }
+  if (samples < 500) return emptyReport();
+  const noise = noiseN ? noiseSum / noiseN : 2;
+  const th = Math.max(4.5, noise * 1.9);
 
-  const browY = (p(9).y + p(105).y + p(334).y) / 3;
+  const flags = new Uint8Array(W * H);
+  let flaggedPixels = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (!mask[i]) continue;
+    if (lum[i] < 22 || lum[i] > 250) continue;
+    const fineRedRes = red[i] - fineRed[i];
+    const fineDarkRes = fineLum[i] - lum[i];
+    const coarseRedRes = red[i] - coarseRed[i];
+    const coarseDarkRes = coarseLum[i] - lum[i];
+    const fineSpot = fineRedRes > th && fineDarkRes > th * 0.55;
+    const broadSpot = coarseRedRes > th * 1.4 && coarseDarkRes > th * 0.9;
+    if (fineSpot || broadSpot) {
+      flags[i] = 1;
+      flaggedPixels++;
+    }
+  }
+
+  // Blob pass: only contiguous clusters count as spots.
+  const minBlob = Math.max(9, Math.round(faceW * faceW * 0.00026));
+  const visited = new Uint8Array(W * H);
+  const stack: number[] = [];
+  let spots = 0;
+  let spotPixels = 0;
+  const regionSpots: number[] = [0, 0, 0, 0];
+  const regionSkin = [0, 0, 0, 0];
+  const browY = p(9).y;
   const mouthY = p(13).y;
   const midX = (p(234).x + p(454).x) / 2;
-
-  let samples = 0;
-  let lumSum = 0;
-  let gradSum = 0;
-  let blown = 0;
+  const bandOf = (y: number, x: number) => (y < browY ? 0 : y < mouthY ? (x < midX ? 1 : 2) : 3);
 
   for (let y = 1; y < H - 1; y++) {
-    const row = y * W;
     for (let x = 1; x < W - 1; x++) {
-      const i = row + x;
+      const i = y * W + x;
       if (!mask[i]) continue;
-      const l = lum[i];
-      if (l > 250) {
-        blown++;
-        continue;
+      regionSkin[bandOf(y, x)]++;
+    }
+  }
+
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const start = y * W + x;
+      if (!flags[start] || visited[start]) continue;
+      let area = 0;
+      let sumX = 0;
+      let sumY = 0;
+      stack.length = 0;
+      stack.push(start);
+      visited[start] = 1;
+      while (stack.length) {
+        const i = stack.pop()!;
+        const iy = (i / W) | 0;
+        const ix = i - iy * W;
+        area++;
+        sumX += ix;
+        sumY += iy;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = ix + dx;
+            const ny = iy + dy;
+            if (nx < 1 || ny < 1 || nx >= W - 1 || ny >= H - 1) continue;
+            const ni = ny * W + nx;
+            if (!flags[ni] || visited[ni]) continue;
+            visited[ni] = 1;
+            stack.push(ni);
+          }
+        }
       }
-      if (l < 20) continue;
-
-      samples++;
-      lumSum += l;
-      gradSum += Math.abs(lum[i + 1] - lum[i - 1]) + Math.abs(lum[i + W] - lum[i - W]);
-
-      const redRes = red[i] - blurRed[i];
-      const darkRes = blurLum[i] - l;
-      const flagged = (redRes > 7 && darkRes > 5) || (redRes > 15 && darkRes > 1.5) || (darkRes > 22 && redRes > 3);
-
-      const ci = ((y / cell) | 0) * cols + ((x / cell) | 0);
-      skinCells[ci]++;
-      if (flagged) flagCells[ci]++;
+      if (area < minBlob) continue;
+      spots++;
+      spotPixels += area;
+      regionSpots[bandOf(sumY / area, sumX / area)]++;
     }
   }
 
-  if (samples < 400) return emptyReport();
-
-  let totalCells = 0;
-  let flaggedCells = 0;
-  const regionTotal = [0, 0, 0, 0];
-  const regionFlagged = [0, 0, 0, 0];
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const ci = y * cols + x;
-      if (skinCells[ci] < 10) continue;
-      totalCells++;
-      const band = y * cell < browY ? 0 : y * cell < mouthY ? (x * cell < midX ? 1 : 2) : 3;
-      regionTotal[band]++;
-      const share = flagCells[ci] / skinCells[ci];
-      if (share < 0.24) continue;
-      flaggedCells++;
-      regionFlagged[band]++;
-    }
-  }
-  if (!totalCells) return emptyReport();
-
-  const blemishShare = flaggedCells / totalCells;
+  const skinPixels = Math.max(1, regionSkin.reduce((a, b) => a + b, 0));
+  const blemishShare = spotPixels / skinPixels;
   const regions: Record<SkinRegion, number> = {
-    forehead: regionTotal[0] ? regionFlagged[0] / regionTotal[0] : 0,
-    left: regionTotal[1] ? regionFlagged[1] / regionTotal[1] : 0,
-    right: regionTotal[2] ? regionFlagged[2] / regionTotal[2] : 0,
-    chin: regionTotal[3] ? regionFlagged[3] / regionTotal[3] : 0,
+    forehead: regionSpots[0],
+    left: regionSpots[1],
+    right: regionSpots[2],
+    chin: regionSpots[3],
   };
 
+  // A spot cluster and a covered area are both real deductions. Twelve small
+  // pimples is not a clear face just because they cover 2% of the skin.
+  // Coverage is the honest signal; counting is a smaller correction so that a
+  // few stray blobs on an otherwise clear face do not read as a breakout.
+  const areaTerm = blemishShare / 0.08;
+  const countTerm = Math.min(1, spots / 24);
+  const severity = clamp01(areaTerm * 0.8 + countTerm * 0.2);
+  const coverageCap = blemishShare > 0.04 ? 0.4 : blemishShare > 0.02 ? 0.6 : 0.98;
+  const clarity = Math.max(0.04, Math.min(coverageCap, clamp01(1 - Math.pow(severity, 0.9))));
+
   const meanLum = lumSum / samples;
-  const roughness = gradSum / samples / Math.max(28, meanLum);
-  const blownShare = blown / Math.max(1, samples + blown);
-  const lighting = clamp01(1 - Math.abs(meanLum - 142) / 125 - blownShare * 2.2);
-
-  // Calibrated against a clear face (about 1% noise at the hairline) and
-  // progressively covered faces: 3% is mild, 8% is moderate, 15% is severe.
-  const excess = Math.max(0, blemishShare - 0.006);
-  // Floor at 8%: severe acne should bottom out, not read as "no skin at all".
-  const clarity = Math.max(0.08, clamp01(1 - Math.pow(excess / 0.1, 0.85)));
-
-  // Laplacian-free roughness: mean neighbour delta over skin luminance.
-  const texture = clamp01(1 - (roughness - 0.052) / 0.085);
+  // High-frequency residual is the honest texture signal: acne, scarring and
+  // dry patches all raise it, while a smooth cheek keeps it near the noise floor.
+  // The old gradient ratio saturated at 100% on almost every face.
+  const texture = Math.min(0.97, clamp01(1 - Math.max(0, noise - 2) / 1.7));
 
   const eyeH = Math.max(2, (eyeR.y1 - eyeR.y0 + eyeL.y1 - eyeL.y0) / 2);
-  const patchMean = (cx: number, cy: number, hw: number, hh: number): number | null => {
+  const patchMean = (px: number, py: number, hw: number, hh: number): number | null => {
     let sum = 0;
     let n = 0;
-    const x0 = Math.max(1, Math.round(cx - hw));
-    const x1 = Math.min(W - 2, Math.round(cx + hw));
-    const y0 = Math.max(1, Math.round(cy - hh));
-    const y1 = Math.min(H - 2, Math.round(cy + hh));
+    const x0 = Math.max(1, Math.round(px - hw));
+    const x1 = Math.min(W - 2, Math.round(px + hw));
+    const y0 = Math.max(1, Math.round(py - hh));
+    const y1 = Math.min(H - 2, Math.round(py + hh));
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const i = y * W + x;
-        if (!mask[i] || lum[i] < 20 || lum[i] > 248) continue;
+        if (!mask[i] || lum[i] < 22 || lum[i] > 248) continue;
         sum += lum[i];
         n++;
       }
@@ -296,31 +324,30 @@ export function analyzeSkin(
     return n > 12 ? sum / n : null;
   };
 
-  const underRatios: number[] = [];
+  const ratios: number[] = [];
   for (const eye of [eyeR, eyeL]) {
-    const cx = (eye.x0 + eye.x1) / 2;
-    const under = patchMean(cx, eye.y1 + eyeH * 0.55, (eye.x1 - eye.x0) * 0.55, eyeH * 0.45);
-    const cheek = patchMean(cx, eye.y1 + eyeH * 3.1, (eye.x1 - eye.x0) * 0.55, eyeH * 0.9);
-    if (under && cheek && cheek > 1) underRatios.push(under / cheek);
+    const ex = (eye.x0 + eye.x1) / 2;
+    const under = patchMean(ex, eye.y1 + eyeH * 0.5, (eye.x1 - eye.x0) * 0.55, eyeH * 0.4);
+    const cheek = patchMean(ex, eye.y1 + eyeH * 3.1, (eye.x1 - eye.x0) * 0.6, eyeH * 0.9);
+    if (under && cheek && cheek > 1) ratios.push(under / cheek);
   }
-  const underRatio = underRatios.length ? underRatios.reduce((a, b) => a + b, 0) / underRatios.length : 0.9;
+  const underRatio = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0.9;
   const underEyes = clamp01((underRatio - 0.52) / 0.42);
 
   const notes: string[] = [];
-  if (blemishShare > 0.16) notes.push('Visible breakout clusters');
-  else if (blemishShare > 0.06) notes.push('Minor blemishes');
-  if (texture < 0.55) notes.push('Textured skin surface');
-  if (underEyes < 0.55) notes.push('Dark under-eye circles');
-  if (lighting < 0.45) notes.push('Lighting makes skin hard to read');
+  if (spots >= 3) notes.push(`${spots} visible spots`);
+  if (clarity < 0.45) notes.push('Active breakouts');
+  if (texture < 0.5) notes.push('Textured surface');
+  if (underEyes < 0.42) notes.push('Under-eye shadows');
 
   return {
     clarity,
     texture,
     underEyes,
     blemishShare,
-    clusters: flaggedCells,
+    spots,
     regions,
-    lighting,
+    lighting: clamp01(1 - Math.abs(meanLum - 142) / 130),
     samples,
     notes,
   };

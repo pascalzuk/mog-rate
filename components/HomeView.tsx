@@ -1,13 +1,14 @@
 'use client';
 
-import { Camera } from '@phosphor-icons/react';
+import { ArrowRight } from '@phosphor-icons/react';
 import InstallPrompt from '@/components/InstallPrompt';
 
-const MEASURED = [
+const SIGNALS = [
   'Symmetry',
+  'Skin and spots',
   'Jawline',
-  'Skin clarity',
-  'Proportions',
+  'Water retention',
+  'Facial thirds',
   'Midface',
   'Canthal tilt',
   'Eye area',
@@ -17,56 +18,60 @@ const MEASURED = [
 
 export default function HomeView({ onScan }: { onScan: () => void }) {
   return (
-    <div className="flex min-h-[100dvh] flex-col px-5">
-      <header className="safe-top flex items-center justify-between pt-3">
-        <div className="flex items-baseline gap-2">
-          <span className="text-[16px] font-black tracking-[-0.04em]">MOG</span>
-          <span className="font-mono text-[9px] tracking-[0.34em] text-white/30">RATE</span>
+    <div className="flex min-h-[100dvh] flex-col bg-ink px-5">
+      <header className="safe-top flex items-baseline justify-between pb-2">
+        <div className="flex items-baseline gap-[3px]">
+          <span className="text-[16px] font-black tracking-[-0.06em]">MOG</span>
+          <span className="text-[16px] font-light tracking-[0.04em] text-white/30">RATE</span>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-white/10 px-2.5 py-1">
-          <span className="h-1 w-1 rounded-full bg-mint" />
-          <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/45">On device</span>
-        </div>
+        <span className="font-mono text-[8.5px] uppercase tracking-[0.16em] text-white/25">
+          On device
+        </span>
       </header>
 
-      <section className="flex flex-1 flex-col justify-center py-10">
-        <p className="font-mono text-[9px] uppercase tracking-[0.32em] text-white/28">Live face scan</p>
-        <h1 className="mt-5 text-[clamp(46px,14.5vw,66px)] font-black leading-[0.86] tracking-[-0.055em]">
+      <section className="flex flex-1 flex-col justify-center">
+        <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/30">
+          Six views, one honest number
+        </p>
+
+        <h1 className="mt-3 text-[clamp(44px,15.5vw,64px)] font-black leading-[0.84] tracking-[-0.055em]">
           How hard
           <br />
-          do you <span className="text-acid">mog?</span>
+          do you <span className="text-signal">mog</span>
+          <span className="text-signal">?</span>
         </h1>
-        <p className="mt-5 max-w-[290px] text-[13.5px] leading-relaxed text-white/45">
-          Nine measurements from a live camera scan, including real skin clarity. Scored on your phone, never
-          uploaded.
+
+        <p className="mt-4 max-w-[260px] text-[13px] leading-relaxed text-white/45">
+          Turn your head through the guide, then face the camera. Ratios, skin, symmetry and
+          fullness measured on the phone.
         </p>
 
         <button
           type="button"
           onClick={onScan}
-          className="mt-9 flex h-[58px] w-full items-center justify-center gap-2.5 rounded-full bg-acid text-[13px] font-black uppercase tracking-[0.14em] text-ink transition active:scale-[0.985]"
+          className="mt-6 flex h-[54px] w-full items-center justify-between rounded-full bg-signal pl-6 pr-2 text-ink transition active:scale-[0.99]"
         >
-          <Camera size={19} weight="fill" />
-          Start scan
+          <span className="text-[13px] font-black uppercase tracking-[0.1em]">Start scan</span>
+          <span className="grid h-[42px] w-[42px] place-items-center rounded-full bg-ink text-signal">
+            <ArrowRight size={17} weight="bold" />
+          </span>
         </button>
       </section>
 
-      <div className="space-y-4 pb-4">
-        <InstallPrompt />
-
-        <div className="rounded-2xl border border-white/10 p-4">
-          <p className="font-mono text-[8px] uppercase tracking-[0.26em] text-white/25">What gets measured</p>
-          <div className="mt-3 grid grid-cols-3 gap-x-3 gap-y-2.5">
-            {MEASURED.map((item) => (
-              <span key={item} className="text-[10.5px] leading-tight text-white/55">
-                {item}
-              </span>
-            ))}
-          </div>
+      <section className="pb-2">
+        <div className="grid grid-cols-2 gap-x-4 border-t border-white/10 pt-3">
+          {SIGNALS.map((signal) => (
+            <p key={signal} className="py-[3px] text-[11px] leading-tight text-white/40">
+              {signal}
+            </p>
+          ))}
         </div>
+      </section>
 
-        <p className="pb-2 font-mono text-[8px] leading-relaxed tracking-[0.16em] text-white/20">
-          FIXED GEOMETRY RUBRIC, NOT A MEDICAL OR SCIENTIFIC ASSESSMENT
+      <div className="pb-3 pt-3">
+        <InstallPrompt />
+        <p className="mt-3 font-mono text-[7.5px] leading-relaxed tracking-[0.11em] text-white/20">
+          RATIOS AND PIXEL HEURISTICS. NOT A DIAGNOSIS, NOT A RATING OF YOUR WORTH.
         </p>
       </div>
     </div>
