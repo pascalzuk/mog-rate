@@ -1,70 +1,73 @@
 'use client';
 
-function Chip({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-full border border-white/10 px-2.5 py-1 font-mono text-[8px] uppercase tracking-[0.18em] text-white/40">
-      {children}
-    </span>
-  );
-}
+import { Camera } from '@phosphor-icons/react';
+import InstallPrompt from '@/components/InstallPrompt';
+
+const MEASURED = [
+  'Symmetry',
+  'Jawline',
+  'Skin clarity',
+  'Proportions',
+  'Midface',
+  'Canthal tilt',
+  'Eye area',
+  'Face width',
+  'Lips',
+];
 
 export default function HomeView({ onScan }: { onScan: () => void }) {
   return (
-    <div className="flex min-h-[100dvh] flex-col">
-      <header className="safe-top flex items-center justify-between px-5 pt-3">
+    <div className="flex min-h-[100dvh] flex-col px-5">
+      <header className="safe-top flex items-center justify-between pt-3">
         <div className="flex items-baseline gap-2">
-          <span className="text-[15px] font-black tracking-[-0.03em]">MOG</span>
-          <span className="font-mono text-[9px] tracking-[0.32em] text-white/35">RATE</span>
+          <span className="text-[16px] font-black tracking-[-0.04em]">MOG</span>
+          <span className="font-mono text-[9px] tracking-[0.34em] text-white/30">RATE</span>
         </div>
         <div className="flex items-center gap-2 rounded-full border border-white/10 px-2.5 py-1">
-          <span className="live-dot h-1 w-1 rounded-full bg-mint" />
-          <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/45">On-device</span>
+          <span className="h-1 w-1 rounded-full bg-mint" />
+          <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-white/45">On device</span>
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col px-6">
-        <div className="rise mt-9">
-          <p className="font-mono text-[9px] uppercase tracking-[0.34em] text-white/30">Self scan · No uploads</p>
-          <h1 className="mt-4 text-[clamp(42px,13.5vw,62px)] font-black leading-[0.88] tracking-[-0.055em]">
-            How hard
-            <br />
-            do you <span className="font-serif font-normal italic tracking-[-0.02em] text-acid">mog?</span>
-          </h1>
-          <p className="mt-4 max-w-[272px] text-[13px] leading-relaxed text-white/45">
-            One photo. 478 facial landmarks measured right here on your phone. A rating out of ten before you head out.
-          </p>
-        </div>
+      <section className="flex flex-1 flex-col justify-center py-10">
+        <p className="font-mono text-[9px] uppercase tracking-[0.32em] text-white/28">Live face scan</p>
+        <h1 className="mt-5 text-[clamp(46px,14.5vw,66px)] font-black leading-[0.86] tracking-[-0.055em]">
+          How hard
+          <br />
+          do you <span className="text-acid">mog?</span>
+        </h1>
+        <p className="mt-5 max-w-[290px] text-[13.5px] leading-relaxed text-white/45">
+          Nine measurements from a live camera scan, including real skin clarity. Scored on your phone, never
+          uploaded.
+        </p>
 
-        <div className="my-auto flex flex-col items-center py-8">
-          <button type="button" onClick={onScan} aria-label="Start face scan" className="scan-cta">
-            <span className="scan-orbit" aria-hidden />
-            <span className="scan-glow" aria-hidden />
-            <span className="scan-core">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path
-                  d="M4 8.5A2.5 2.5 0 016.5 6h1.2l1-2h6.6l1 2h1.2A2.5 2.5 0 0120 8.5v8A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8z"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinejoin="round"
-                />
-                <circle cx="12" cy="12.5" r="3.4" stroke="currentColor" strokeWidth="1.8" />
-              </svg>
-              <span className="mt-1 font-mono text-[9px] font-bold uppercase tracking-[0.18em]">Start scan</span>
-            </span>
-          </button>
-          <p className="mt-6 font-mono text-[9px] uppercase tracking-[0.26em] text-white/25">Tap to open camera</p>
-        </div>
+        <button
+          type="button"
+          onClick={onScan}
+          className="mt-9 flex h-[58px] w-full items-center justify-center gap-2.5 rounded-full bg-acid text-[13px] font-black uppercase tracking-[0.14em] text-ink transition active:scale-[0.985]"
+        >
+          <Camera size={19} weight="fill" />
+          Start scan
+        </button>
+      </section>
 
-        <div className="pb-2">
-          <div className="flex flex-wrap gap-1.5">
-            <Chip>478 landmarks</Chip>
-            <Chip>On-device</Chip>
-            <Chip>0 uploads</Chip>
+      <div className="space-y-4 pb-4">
+        <InstallPrompt />
+
+        <div className="rounded-2xl border border-white/10 p-4">
+          <p className="font-mono text-[8px] uppercase tracking-[0.26em] text-white/25">What gets measured</p>
+          <div className="mt-3 grid grid-cols-3 gap-x-3 gap-y-2.5">
+            {MEASURED.map((item) => (
+              <span key={item} className="text-[10.5px] leading-tight text-white/55">
+                {item}
+              </span>
+            ))}
           </div>
-          <p className="mt-4 font-mono text-[8px] leading-relaxed tracking-[0.16em] text-white/20">
-            GOOD LIGHT · FRONT CAMERA · NEUTRAL FACE
-          </p>
         </div>
+
+        <p className="pb-2 font-mono text-[8px] leading-relaxed tracking-[0.16em] text-white/20">
+          FIXED GEOMETRY RUBRIC, NOT A MEDICAL OR SCIENTIFIC ASSESSMENT
+        </p>
       </div>
     </div>
   );

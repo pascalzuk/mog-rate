@@ -29,7 +29,7 @@ export default function MogApp() {
     timer.current = window.setTimeout(() => {
       setPhase('result');
       window.scrollTo({ top: 0 });
-    }, 1650);
+    }, 1450);
   }, []);
 
   return (

@@ -7,7 +7,6 @@
   --color-mint: #4cff9b;
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', Roboto,
     system-ui, sans-serif;
-  --font-serif: ui-serif, 'New York', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
 }
 
@@ -54,18 +53,18 @@ button {
   z-index: -1;
   pointer-events: none;
   background:
-    radial-gradient(120% 70% at 50% -18%, rgba(216, 255, 77, 0.16), transparent 58%),
-    radial-gradient(90% 60% at 50% 112%, rgba(76, 255, 155, 0.1), transparent 62%);
+    radial-gradient(120% 70% at 50% -18%, rgba(216, 255, 77, 0.14), transparent 58%),
+    radial-gradient(90% 60% at 50% 112%, rgba(76, 255, 155, 0.08), transparent 62%);
 }
 
-/* film grain */
+/* film grain, fixed and non-interactive so it never repaints on scroll */
 .grain::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: 60;
   pointer-events: none;
-  opacity: 0.035;
+  opacity: 0.03;
   mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
 }
@@ -78,102 +77,31 @@ button {
   padding-bottom: max(env(safe-area-inset-bottom), 14px);
 }
 
-/* ---- scan button ---- */
-.scan-cta {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: min(58vw, 196px);
-  aspect-ratio: 1;
-  border-radius: 999px;
-  -webkit-user-select: none;
-  user-select: none;
-  transition: transform 160ms ease;
-}
-
-.scan-cta:active {
-  transform: scale(0.965);
-}
-
-.scan-orbit {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  border: 1px dashed rgba(216, 255, 77, 0.35);
-  animation: orbit 26s linear infinite;
-}
-
-.scan-glow {
-  position: absolute;
-  inset: 12%;
-  border-radius: 999px;
-  background: radial-gradient(circle, rgba(216, 255, 77, 0.4), transparent 70%);
-  filter: blur(18px);
-  animation: breathe 4.5s ease-in-out infinite;
-}
-
-.scan-core {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  width: 72%;
-  aspect-ratio: 1;
-  border-radius: 999px;
-  background: var(--color-acid);
-  color: #07070a;
-  box-shadow: 0 18px 50px -18px rgba(216, 255, 77, 0.6);
-}
-
-.live-dot {
-  box-shadow: 0 0 8px rgba(76, 255, 155, 0.9);
-  animation: blip 2.4s ease-in-out infinite;
-}
-
 /* ---- transitions ---- */
 .rise {
-  animation: rise 620ms cubic-bezier(0.16, 0.84, 0.28, 1) both;
+  animation: rise 560ms cubic-bezier(0.16, 0.84, 0.28, 1) both;
 }
 
 .rise-1 {
-  animation-delay: 70ms;
+  animation-delay: 60ms;
 }
 
 .rise-2 {
-  animation-delay: 150ms;
+  animation-delay: 130ms;
 }
 
 .rise-3 {
-  animation-delay: 240ms;
+  animation-delay: 210ms;
 }
 
 .scanline {
-  animation: scanline 1.7s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-}
-
-@keyframes orbit {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes breathe {
-  0%,
-  100% {
-    opacity: 0.45;
-    transform: scale(0.96);
-  }
-  50% {
-    opacity: 0.9;
-    transform: scale(1.04);
-  }
+  animation: scanline 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(16px);
+    transform: translateY(14px);
   }
   to {
     opacity: 1;
@@ -183,7 +111,7 @@ button {
 
 @keyframes scanline {
   0% {
-    top: -18%;
+    top: -16%;
     opacity: 0;
   }
   15% {
@@ -193,27 +121,14 @@ button {
     opacity: 1;
   }
   100% {
-    top: 104%;
+    top: 102%;
     opacity: 0;
-  }
-}
-
-@keyframes blip {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .rise,
-  .scanline,
-  .scan-orbit,
-  .scan-glow,
-  .live-dot {
+  .scanline {
     animation: none;
   }
 }

@@ -1,29 +1,47 @@
 # MOG RATE
 
-A mobile-first face scan that rates how hard you mog. Point your camera at your face, get a rating out of 10, a tier, and a breakdown of eight facial measurements — before you head out to dinner.
+A mobile face scan that rates how hard you mog. Point the camera at your face, tap once, hold still for about a second, and get a rating out of 10 with an itemised breakdown of what is helping and what is costing you.
 
-Built to be added to the iOS home screen and look like a native app.
+Built to be added to the iOS home screen and to look like a native app.
 
-## How it works
+## How the scan works
 
-- **`@mediapipe/tasks-vision` Face Landmarker** — a small on-device ML model that finds 478 facial landmarks (468 mesh points + iris centres) in real time.
-- The camera preview draws a **green lock box** around your face as soon as it is detected.
-- On scan, the photo is measured locally: symmetry, jawline, midface ratio, canthal tilt, proportions, eye area, facial width, lips.
-- Landmarks are **pose-normalised** first (roll + yaw solved from landmark depth), so holding the phone at an angle doesn't tank the score.
-- **No API keys, no accounts, no image uploads.** The photo never leaves the phone, which also means zero server cost and nothing to configure on Vercel.
+1. The preview runs MediaPipe Face Landmarker (468 mesh points plus iris centres) about 14 times a second and draws a green lock box around your face, so you know it has found you before you commit.
+2. Tapping SCAN captures **seven frames** at ~130 ms intervals while you keep posing. There is no still photo step and no shutter flash.
+3. Each frame is measured independently, then the **median** of every metric is used. A blink, a smear, or one bad tracking tick gets thrown out instead of ruining the read.
+4. Landmarks are pose normalised before measuring: the eye line is levelled (roll), then the head turn (yaw) is solved from landmark depth and undone. Vertical spans use 3D distance so a tilted head does not read as a long chin.
+5. Skin is measured from **pixels**, not landmarks: the face oval is sampled, eyes/brows/lips/nostrils are excluded, and the local skin tone is subtracted to find clusters that are both redder and darker than their neighbours. That catches breakouts, texture and under-eye shadow.
+6. Everything runs on the device. No API keys, no accounts, no uploads, no server cost, nothing to configure on Vercel.
 
-The scoring is a fun, opinionated geometry rubric — not science, not medical, not that serious.
+## What gets measured
 
-## Run locally
+| Metric | What it looks at |
+| --- | --- |
+| Symmetry | Weighted offset between mirrored landmark pairs (mouth excluded, because smiling fakes asymmetry) |
+| Jawline | Bigonial width relative to cheekbones, plus the gonial angle |
+| Skin | Blemish coverage, surface texture, under-eye darkness |
+| Proportions | Lower third against middle third |
+| Midface | Interpupillary distance over eye-to-lip height |
+| Canthal tilt | Angle of the outer eye corner relative to the inner one |
+| Eye area | Aperture and intercanthal spacing |
+| Face width | Facial width-to-height |
+| Lips | Upper/lower vermilion ratio and mouth-to-nose width |
+
+The overall score is a weighted composite on a deliberately harsh curve, with hard caps: a clearly asymmetric face or visible breakouts cannot average its way to a 9. Every deduction is listed with the number that produced it, so a low score is explainable rather than mysterious.
+
+This is a fixed geometry and pixel heuristic. It is not a dermatology model, not medical advice, and not science. It also cannot judge lighting, expression, or how you actually look in a room.
+
+## Install on your phone
+
+**iOS:** open the URL in **Safari**, tap Share, then **Add to Home Screen**. It must be Safari; Chrome and in-app browsers on iOS cannot install a standalone web app.
+
+**Android:** Chrome shows a native install prompt, or use the menu and **Install app**.
+
+There is no link that installs a web app on iOS in one tap. Apple does not expose that. The app detects this and shows the Share sheet instructions itself, which is the closest thing possible.
 
 ```bash
 npm install
-npm run dev
-```
-
-Open http://localhost:3000. Camera access needs `localhost` or HTTPS.
-
-```bash
+npm run dev      # http://localhost:3000 (camera needs localhost or HTTPS)
 npm run build
 npm start
 ```
@@ -31,25 +49,18 @@ npm start
 ## Deploy to Vercel
 
 1. Push this repo to GitHub.
-2. In Vercel: **Add New → Project → Import** the repo.
-3. Framework preset **Next.js**, no environment variables, click **Deploy**.
+2. Vercel: **Add New → Project → Import** the repository.
+3. Framework preset **Next.js**, no environment variables, **Deploy**.
 
-That's it. Everything is client-side; the model and WASM runtime ship from `public/`.
+The model (~3.6 MB) and the MediaPipe WASM runtime are served from `public/` with immutable cache headers, so the first camera open downloads them and every open after that is instant.
 
-## Add to iOS home screen
+## Notes and limits
 
-1. Open the deployed URL in **Safari** (must be Safari for the standalone mode).
-2. Tap **Share → Add to Home Screen**.
-3. Launch it from the home screen — it opens full-screen, no browser chrome, with the custom icon.
-
-The manifest and `apple-mobile-web-app-*` meta tags are already set up, including safe-area insets for the notch and home indicator.
-
-## Notes
-
-- The model is ~3.6 MB and the WASM runtime loads once on first camera open, then comes from cache.
-- If the camera is blocked, the "Use a photo instead" fallback runs the same analysis on a picture from the library.
-- Face data is never stored; results live in memory for the session.
+- Camera framing asks for a tall stream and caps the preview crop, so the preview is not blown up the way a square or 16:9 request looks on a portrait iPhone. If the browser still hands back a wide stream, the stage stays a portrait window rather than cropping to a sliver.
+- Photo fallback: if camera permission is blocked, the same analysis runs on an image from the library.
+- Skin readings are less reliable in poor light, and the result says so when the capture quality is low.
+- Nothing is stored. Results live in memory for the session.
 
 ## Stack
 
-Next.js 15 (App Router) · React 19 · Tailwind CSS 4 · MediaPipe Tasks Vision
+Next.js 15 (App Router) · React 19 · Tailwind CSS 4 · MediaPipe Tasks Vision · Phosphor Icons
